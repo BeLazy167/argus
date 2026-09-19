@@ -7,6 +7,7 @@ import {
 	useProviderKeys,
 	useUpsertProviderKey,
 } from "@/lib/queries/provider-keys";
+import { useRepos } from "@/lib/queries/repos";
 import type { ProviderKey } from "@/lib/types";
 import { StatusBadge } from "./status-badge";
 
@@ -27,6 +28,7 @@ const JEV_DEFAULT_ENDPOINT = "https://api.typesafe.ai";
  */
 export function JevCard() {
 	const { data: keys, isLoading } = useProviderKeys();
+	const { data: repos } = useRepos();
 
 	if (isLoading) {
 		return (
@@ -39,10 +41,29 @@ export function JevCard() {
 			</div>
 		);
 	}
-	return <JevForm current={keys?.find((k) => k.provider === JEV_PROVIDER)} />;
+	// This card manages the installation-scoped row only. Repo-scoped
+	// typesafe keys resolve FIRST for their repos — surface them read-only so
+	// a repo key is never mistaken for (or mutated as) the org-wide config.
+	const typed = keys?.filter((k) => k.provider === JEV_PROVIDER) ?? [];
+	const repoScoped = typed.filter((k) => k.repo_id != null);
+	return (
+		<JevForm
+			current={typed.find((k) => k.repo_id == null)}
+			repoScoped={repoScoped}
+			repoNames={new Map(repos?.map((r) => [r.id, r.full_name]) ?? [])}
+		/>
+	);
 }
 
-function JevForm({ current }: { current: ProviderKey | undefined }) {
+function JevForm({
+	current,
+	repoScoped,
+	repoNames,
+}: {
+	current: ProviderKey | undefined;
+	repoScoped: ProviderKey[];
+	repoNames: Map<number, string>;
+}) {
 	const upsert = useUpsertProviderKey();
 	const del = useDeleteProviderKey();
 
@@ -75,6 +96,15 @@ function JevForm({ current }: { current: ProviderKey | undefined }) {
 		);
 	};
 
+	const handleDelete = () => {
+		if (!current) return;
+		setError("");
+		del.mutate(current.id, {
+			onSuccess: () => setBaseURL(""),
+			onError: (err) => setError(err instanceof Error ? err.message : "Remove failed"),
+		});
+	};
+
 	return (
 		<div className="border border-iron bg-charcoal p-5">
 			<div className="flex items-center justify-between mb-3">
@@ -93,6 +123,23 @@ function JevForm({ current }: { current: ProviderKey | undefined }) {
 					Key: {current.api_key_masked}
 					{current.base_url ? ` — via ${current.base_url}` : ""}
 				</p>
+			)}
+
+			{repoScoped.length > 0 && (
+				<div className="border border-iron/60 bg-background/60 px-3 py-2 mb-3">
+					<p className="text-[10px] font-mono text-slate-text mb-1 leading-relaxed">
+						Repo-scoped keys — take precedence over this key for their repos:
+					</p>
+					<ul className="space-y-0.5">
+						{repoScoped.map((k) => (
+							<li key={k.id} className="text-[10px] font-mono text-slate-text/80">
+								{(k.repo_id != null && repoNames.get(k.repo_id)) || `repo #${k.repo_id}`}:{" "}
+								{k.api_key_masked}
+								{k.base_url ? ` — via ${k.base_url}` : ""}
+							</li>
+						))}
+					</ul>
+				</div>
 			)}
 
 			<p className="text-[10px] font-mono text-slate-text mb-3 leading-relaxed">
@@ -177,7 +224,7 @@ function JevForm({ current }: { current: ProviderKey | undefined }) {
 				{current && (
 					<button
 						type="button"
-						onClick={() => del.mutate(current.id, { onSuccess: () => setBaseURL("") })}
+						onClick={handleDelete}
 						disabled={busy}
 						aria-label="Remove TypeSafe Jev key (revert to server default)"
 						className="flex items-center gap-1.5 border border-iron px-3 py-1 text-[11px] font-mono text-slate-text hover:text-red-400 hover:border-red-400/40 transition-colors disabled:opacity-50"

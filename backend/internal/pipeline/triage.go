@@ -188,8 +188,9 @@ func (ts *TriageStage) llmTriage(ctx context.Context, run *PipelineRun) (results
 		return nil, fmt.Errorf("triage LLM: %w", err)
 	}
 
-	// Accumulate token usage
-	run.Tokens.Triage = StageTokens{
+	// Accumulate token usage — fold rather than overwrite so the Jev shadow's
+	// aux entry survives; the LLM leg is the deciding leg and owns the stamp.
+	tokens := StageTokens{
 		PromptTokens:     resp.TokensUsed.PromptTokens,
 		CompletionTokens: resp.TokensUsed.CompletionTokens,
 		TotalTokens:      resp.TokensUsed.TotalTokens,
@@ -197,7 +198,10 @@ func (ts *TriageStage) llmTriage(ctx context.Context, run *PipelineRun) (results
 		Model:            cfg.Model,
 		Provider:         cfg.Provider,
 	}
-	run.Tokens.addToTotal(run.Tokens.Triage)
+	foldAuxTokens(&run.Tokens.Triage, tokens)
+	run.Tokens.Triage.Model = cfg.Model
+	run.Tokens.Triage.Provider = cfg.Provider
+	run.Tokens.addToTotal(tokens)
 
 	parsedResults, err := parseTriageResponse(resp.Content)
 	if err != nil {

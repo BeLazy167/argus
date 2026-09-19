@@ -16,6 +16,7 @@ package pipeline
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -36,66 +37,102 @@ const jevTriageShadowMaxFiles = 40
 // calibration data, never wrong behavior.
 const jevShadowJoinBudget = 750 * time.Millisecond
 
+// jevShadowDrainBudget is the short grace window after an abandon-cancel:
+// an eval that was mid-flight when the join budget expired gets this long
+// to land so its spend is still billed and its answers still compared —
+// an abandoned comparison loses calibration data, but never loses money.
+const jevShadowDrainBudget = 250 * time.Millisecond
+
 type jevTriageShadowResult struct {
-	res jev.Result
-	err error
+	res     jev.Result
+	err     error
+	skipped bool // no evaluator resolved — nothing ran, nothing to bill
 }
 
-// startJevTriageShadow builds the eval synchronously (pure) and fires it on a
-// goroutine. Returns nil when the shadow doesn't run — the join is a no-op.
-func (ts *TriageStage) startJevTriageShadow(ctx context.Context, run *PipelineRun) chan jevTriageShadowResult {
+// jevTriageShadow is one running shadow eval: the buffered result channel
+// plus the cancel for its context, so an abandoned join can still stop the
+// in-flight request instead of letting it finish unobserved.
+type jevTriageShadow struct {
+	ch     chan jevTriageShadowResult
+	cancel context.CancelFunc
+}
+
+// startJevTriageShadow builds the eval payload synchronously (pure — run is
+// read on Execute's goroutine before later stages can mutate it) and fires
+// the rest on a goroutine: the BYOK key lookup AND the eval both happen off
+// the caller's path so provider-key DB reads never block the LLM leg.
+// Returns nil when the shadow doesn't run — the join is a no-op.
+func (ts *TriageStage) startJevTriageShadow(ctx context.Context, run *PipelineRun) *jevTriageShadow {
 	if run.Diff == nil || len(run.Diff.Files) == 0 || len(run.Diff.Files) > jevTriageShadowMaxFiles {
 		return nil
 	}
-	j := resolveJevEvaluator(ctx, jevKeyReaderFor(ts.store), ts.jev, run.DBInstallationID, &run.DBRepoID, run.FeatureFlags)
-	if j == nil {
+	if ts.jev == nil && ts.store == nil {
+		// Neither credential path exists — skip spawning the resolver
+		// goroutine entirely (the common self-hosted no-Jev shape).
 		return nil
 	}
 	state := jevTriageShadowState(run)
 	questions := jevTriageShadowQuestions(len(run.Diff.Files))
-	ch := make(chan jevTriageShadowResult, 1)
+	jevCtx, cancel := context.WithTimeout(ctx, jevEvalTimeout)
+	s := &jevTriageShadow{ch: make(chan jevTriageShadowResult, 1), cancel: cancel}
 	go func() {
-		jevCtx, cancel := context.WithTimeout(ctx, jevEvalTimeout)
 		defer cancel()
+		j := resolveJevEvaluator(jevCtx, jevKeyReaderFor(ts.store), ts.jev, run.DBInstallationID, &run.DBRepoID, run.FeatureFlags)
+		if j == nil {
+			s.ch <- jevTriageShadowResult{skipped: true}
+			return
+		}
 		res, err := j.Evaluate(jevCtx, state, questions, "triage_shadow")
-		ch <- jevTriageShadowResult{res: res, err: err}
+		s.ch <- jevTriageShadowResult{res: res, err: err}
 	}()
-	return ch
+	return s
 }
 
 // finishJevTriageShadow joins the shadow goroutine with a bounded wait, bills
 // spend into the Triage bucket, and logs the per-file agreement comparison.
-// An unanswered shadow within jevShadowJoinBudget is abandoned — the goroutine
-// still drains into its buffered channel, nothing leaks.
-func (ts *TriageStage) finishJevTriageShadow(ctx context.Context, run *PipelineRun, ch chan jevTriageShadowResult, results map[string]TriageResult) {
-	if ch == nil {
+// An unanswered shadow within jevShadowJoinBudget is cancelled — the request
+// is aborted rather than completing unbilled — then the channel is drained
+// once so an answer that raced the cancel still bills and compares.
+func (ts *TriageStage) finishJevTriageShadow(ctx context.Context, run *PipelineRun, s *jevTriageShadow, results map[string]TriageResult) {
+	if s == nil {
 		return
 	}
 	var out jevTriageShadowResult
 	select {
-	case out = <-ch:
+	case out = <-s.ch:
 	case <-time.After(jevShadowJoinBudget):
-		slog.InfoContext(ctx, "jev triage shadow abandoned",
-			slog.String("event", "jev.shadow.triage_abandoned"),
-			slog.Int("file_count", len(run.Diff.Files)),
-			slog.String("trace_id", obs.TraceID(ctx)),
-		)
+		// Budget spent: cancel the in-flight eval so a dropped comparison
+		// doesn't keep burning spend, then drain briefly — an answer that
+		// lands in this window still bills and still compares.
+		s.cancel()
+		select {
+		case out = <-s.ch:
+		case <-time.After(jevShadowDrainBudget):
+			slog.InfoContext(ctx, "jev triage shadow abandoned",
+				slog.String("event", "jev.shadow.triage_abandoned"),
+				slog.Int("file_count", len(run.Diff.Files)),
+				slog.String("trace_id", obs.TraceID(ctx)),
+			)
+			return
+		}
+	}
+	if out.skipped {
 		return
 	}
 	spend := jevStageTokens(out.res)
-	run.Tokens.Triage.PromptTokens += spend.PromptTokens
-	run.Tokens.Triage.CompletionTokens += spend.CompletionTokens
-	run.Tokens.Triage.TotalTokens += spend.TotalTokens
-	run.Tokens.Triage.Cost += spend.Cost
-	// Stamp only spend that actually happened — a zero-token error result
-	// must not brand the bucket "typesafe".
-	if run.Tokens.Triage.Model == "" && spend.TotalTokens > 0 {
-		run.Tokens.Triage.Model = out.res.Model
-		run.Tokens.Triage.Provider = "typesafe"
-	}
+	foldAuxTokens(&run.Tokens.Triage, spend)
 	run.Tokens.addToTotal(spend)
 
 	if out.err != nil {
+		if errors.Is(out.err, context.Canceled) {
+			// Our own abandon-cancel raced the in-flight result — an
+			// aborted call, not a Jev failure.
+			slog.InfoContext(ctx, "jev triage shadow cancelled",
+				slog.String("event", "jev.shadow.triage_abandoned"),
+				slog.String("trace_id", obs.TraceID(ctx)),
+			)
+			return
+		}
 		slog.WarnContext(ctx, "jev triage shadow failed", "error", out.err, "pr", run.PREvent.PRNumber)
 		return
 	}

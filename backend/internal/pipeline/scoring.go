@@ -153,10 +153,18 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) (err erro
 	// Jev false-positive pre-filter: confident FPs leave the judge prompt and
 	// re-enter below as low-scored synthetic groups (audit trail preserved).
 	// Fail-open: a Jev error or uncertain answer drops nothing. Spend is billed
-	// to the Scoring bucket now so the LLM-error paths stay accurate.
+	// to the Scoring bucket now so the LLM-error paths stay accurate — fold
+	// into the bucket's aux ledger so typesafe spend stays attributable even
+	// when the judge leg stamps the headline next.
 	jevDropped, jevSpend := ss.jevScoringPreFilter(ctx, run, allComments)
-	run.Tokens.Scoring = jevSpend
+	foldAuxTokens(&run.Tokens.Scoring, jevSpend)
 	run.Tokens.addToTotal(jevSpend)
+	if run.EventBus != nil && jevSpend.TotalTokens > 0 {
+		run.EventBus.PublishForAttempt(run.ReviewID, run.AttemptGeneration, EventTokenUpdate, map[string]any{
+			"total_tokens": run.Tokens.Total.TotalTokens,
+			"cost":         run.Tokens.Total.Cost,
+		})
+	}
 	survReviews, survivors := survivingFileReviews(run, allComments, jevDropped)
 
 	// Fetch repo memory context for scoring calibration
@@ -185,8 +193,8 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) (err erro
 			return nil // non-fatal
 		}
 
-		// Track scoring tokens — accumulate onto the Jev spend billed above;
-		// Model/Provider name the headline call.
+		// Track scoring tokens — fold onto the bucket so the Jev pre-filter's
+		// aux entry survives; the judge is the deciding leg and owns the stamp.
 		tokens := StageTokens{
 			PromptTokens:     resp.TokensUsed.PromptTokens,
 			CompletionTokens: resp.TokensUsed.CompletionTokens,
@@ -195,10 +203,7 @@ func (ss *ScoringStage) Execute(ctx context.Context, run *PipelineRun) (err erro
 			Model:            cfg.Model,
 			Provider:         cfg.Provider,
 		}
-		run.Tokens.Scoring.PromptTokens += tokens.PromptTokens
-		run.Tokens.Scoring.CompletionTokens += tokens.CompletionTokens
-		run.Tokens.Scoring.TotalTokens += tokens.TotalTokens
-		run.Tokens.Scoring.Cost += tokens.Cost
+		foldAuxTokens(&run.Tokens.Scoring, tokens)
 		run.Tokens.Scoring.Model = cfg.Model
 		run.Tokens.Scoring.Provider = cfg.Provider
 		run.Tokens.addToTotal(tokens)
@@ -466,15 +471,18 @@ func scoringFindingText(idx int, path string, c FileComment) string {
 	var sb strings.Builder
 	specialist := ""
 	if c.Specialist != "" {
-		specialist = fmt.Sprintf(" [%s]", c.Specialist)
+		specialist = fmt.Sprintf(" [%s]", sanitizeUserInput(string(c.Specialist)))
 	}
 	desc := c.What
 	if desc == "" {
 		desc = c.Body
 	}
-	sb.WriteString(fmt.Sprintf("[%d] %s:%d%s — [%s|%s] %s\n", idx, path, c.Line, specialist, c.Severity, c.Category, desc))
+	// Finding text is second-order untrusted — the reviewer may quote injected
+	// instructions straight out of the diff. Sanitize + delimiter-wrap so the
+	// quoted text can't pose as prompt directives.
+	sb.WriteString(fmt.Sprintf("[%d] %s:%d%s — [%s|%s] %s\n", idx, sanitizeUserInput(path), c.Line, specialist, c.Severity, c.Category, wrapSafeDelimiters("finding_text", sanitizeUserInput(desc))))
 	if c.Suggestion != "" {
-		sb.WriteString(fmt.Sprintf("    suggestion: %s\n", c.Suggestion))
+		sb.WriteString(fmt.Sprintf("    suggestion: %s\n", wrapSafeDelimiters("suggestion_text", sanitizeUserInput(c.Suggestion))))
 	}
 	if c.BlastRadius > 0 {
 		sb.WriteString(fmt.Sprintf("    blast_radius: This finding affects %d downstream dependents\n", c.BlastRadius))

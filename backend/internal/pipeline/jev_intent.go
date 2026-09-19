@@ -43,7 +43,9 @@ func jevIntentState(run *PipelineRun) map[string]any {
 	files := []string{}
 	if run.Diff != nil {
 		for _, f := range run.Diff.Files {
-			files = append(files, fmt.Sprintf("%s (%s)", f.NewName, f.Status))
+			// Filenames are PR-author-controlled — sanitize like any other
+			// untrusted field entering the state.
+			files = append(files, fmt.Sprintf("%s (%s)", sanitizeUserInput(f.NewName), f.Status))
 		}
 	}
 	findings := []string{}
@@ -55,7 +57,7 @@ func jevIntentState(run *PipelineRun) map[string]any {
 				desc = c.Body
 			}
 			findings = append(findings, fmt.Sprintf("%d: [%s] %s:%d — %s",
-				id, c.Severity, fr.Path, c.Line, sanitizeUserInput(util.Truncate(desc, 200, true))))
+				id, c.Severity, sanitizeUserInput(fr.Path), c.Line, sanitizeUserInput(util.Truncate(desc, 200, true))))
 			id++
 		}
 	}

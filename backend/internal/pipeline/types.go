@@ -91,15 +91,22 @@ type RunTokenUsage struct {
 // StageTokens holds token counts and cost for a single LLM call or stage aggregate.
 // For review-stage units, Specialist names the reviewer (correctness, security,
 // architecture, regression) or is empty for skim/single-pass reviews.
+//
+// Aux is the per-leg ledger for buckets that can mix providers (e.g. a Jev
+// pre-filter or shadow plus the deciding LLM call): every non-trivial spend
+// appends an entry carrying its own model/provider. Bucket numerics stay the
+// stage total — Model/Provider is only the display label — so consumers
+// wanting per-model attribution (stats/models) must read Aux when present.
 type StageTokens struct {
-	PromptTokens     int     `json:"prompt_tokens"`
-	CompletionTokens int     `json:"completion_tokens"`
-	TotalTokens      int     `json:"total_tokens"`
-	Cost             float64 `json:"cost"`
-	Model            string  `json:"model,omitempty"`
-	Provider         string  `json:"provider,omitempty"`
-	File             string  `json:"file,omitempty"`
-	Specialist       string  `json:"specialist,omitempty"`
+	PromptTokens     int           `json:"prompt_tokens"`
+	CompletionTokens int           `json:"completion_tokens"`
+	TotalTokens      int           `json:"total_tokens"`
+	Cost             float64       `json:"cost"`
+	Model            string        `json:"model,omitempty"`
+	Provider         string        `json:"provider,omitempty"`
+	File             string        `json:"file,omitempty"`
+	Specialist       string        `json:"specialist,omitempty"`
+	Aux              []StageTokens `json:"aux,omitempty"`
 }
 
 // PipelineRun tracks the state and intermediate results of a single review.
@@ -491,14 +498,7 @@ func (r *RunTokenUsage) addLeadAgent(s StageTokens) {
 // workers, so the lock guards the combined bucket + total write.
 func (r *RunTokenUsage) addAcceptance(s StageTokens) {
 	r.mu.Lock()
-	r.Acceptance.PromptTokens += s.PromptTokens
-	r.Acceptance.CompletionTokens += s.CompletionTokens
-	r.Acceptance.TotalTokens += s.TotalTokens
-	r.Acceptance.Cost += s.Cost
-	if r.Acceptance.Model == "" {
-		r.Acceptance.Model = s.Model
-		r.Acceptance.Provider = s.Provider
-	}
+	foldAuxTokens(&r.Acceptance, s)
 	r.Total.PromptTokens += s.PromptTokens
 	r.Total.CompletionTokens += s.CompletionTokens
 	r.Total.TotalTokens += s.TotalTokens
@@ -508,19 +508,34 @@ func (r *RunTokenUsage) addAcceptance(s StageTokens) {
 
 func (r *RunTokenUsage) addCrossPR(s StageTokens) {
 	r.mu.Lock()
-	r.CrossPR.PromptTokens += s.PromptTokens
-	r.CrossPR.CompletionTokens += s.CompletionTokens
-	r.CrossPR.TotalTokens += s.TotalTokens
-	r.CrossPR.Cost += s.Cost
-	if r.CrossPR.Model == "" {
-		r.CrossPR.Model = s.Model
-		r.CrossPR.Provider = s.Provider
-	}
+	foldAuxTokens(&r.CrossPR, s)
 	r.Total.PromptTokens += s.PromptTokens
 	r.Total.CompletionTokens += s.CompletionTokens
 	r.Total.TotalTokens += s.TotalTokens
 	r.Total.Cost += s.Cost
 	r.mu.Unlock()
+}
+
+// foldAuxTokens merges one leg's spend into a stage bucket that can mix
+// providers: numerics fold into the bucket (it stays the stage total) and
+// the leg appends itself to Aux with its own model/provider, so per-model
+// attribution survives the fold. The headline Model/Provider is a display
+// label — an empty bucket takes the leg's stamp; a set one is left alone
+// (callers overwrite it explicitly when their leg is the decider).
+func foldAuxTokens(bucket *StageTokens, spend StageTokens) {
+	bucket.PromptTokens += spend.PromptTokens
+	bucket.CompletionTokens += spend.CompletionTokens
+	bucket.TotalTokens += spend.TotalTokens
+	bucket.Cost += spend.Cost
+	if spend.Model == "" || (spend.TotalTokens == 0 && spend.Cost == 0) {
+		return
+	}
+	spend.Aux = nil // legs enter the ledger flat; a nested ledger is dead weight
+	bucket.Aux = append(bucket.Aux, spend)
+	if bucket.Model == "" {
+		bucket.Model = spend.Model
+		bucket.Provider = spend.Provider
+	}
 }
 
 // addAutoResolve mirrors addCrossPR for the AutoResolve bucket. resolveCandidates
@@ -529,16 +544,10 @@ func (r *RunTokenUsage) addCrossPR(s StageTokens) {
 // would cost up to maxJudgeCallsPerPush UPDATEs per push for the same total.
 func (r *RunTokenUsage) addAutoResolve(s StageTokens) {
 	r.mu.Lock()
-	r.AutoResolve.PromptTokens += s.PromptTokens
-	r.AutoResolve.CompletionTokens += s.CompletionTokens
-	r.AutoResolve.TotalTokens += s.TotalTokens
-	r.AutoResolve.Cost += s.Cost
-	// Re-stamp per call: each thread is decided by one leg (Jev or LLM), and a
-	// mixed bucket should name a deciding model, not whichever ran first.
-	if s.Model != "" {
-		r.AutoResolve.Model = s.Model
-		r.AutoResolve.Provider = s.Provider
-	}
+	// First-writer headline (matches the MergeStageTokenEntry COALESCE): the
+	// bucket label names a deciding leg, and Aux records every call's
+	// provenance so a Jev+LLM mix never misattributes either side's spend.
+	foldAuxTokens(&r.AutoResolve, s)
 	r.Total.PromptTokens += s.PromptTokens
 	r.Total.CompletionTokens += s.CompletionTokens
 	r.Total.TotalTokens += s.TotalTokens

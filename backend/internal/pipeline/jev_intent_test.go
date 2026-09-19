@@ -147,3 +147,20 @@ func TestJevIntentVerdict_TooManyFindingsSkipsEval(t *testing.T) {
 		t.Fatal("over-cap run must not spend an eval")
 	}
 }
+
+func TestJevIntentVerdict_TooManyCriteriaSkipsEval(t *testing.T) {
+	run := intentRun(1)
+	run.PRIntent.AcceptanceCriteria = make([]string, jevIntentMaxCriteria+1)
+	for i := range run.PRIntent.AcceptanceCriteria {
+		run.PRIntent.AcceptanceCriteria[i] = fmt.Sprintf("c%d", i)
+	}
+	fj := &fakeJev{result: allClearIntentResult(jevIntentMaxCriteria+1, 1)}
+	o := &Orchestrator{jev: fj, logger: discardLogger()}
+
+	if _, _, confident := o.jevIntentVerdict(context.Background(), run, fj); confident {
+		t.Fatal("over-cap criteria must escalate")
+	}
+	if fj.calls != 0 {
+		t.Fatal("over-cap criteria run must not spend an eval")
+	}
+}

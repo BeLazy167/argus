@@ -199,6 +199,37 @@ func (s *Server) statsModels(w http.ResponseWriter, r *http.Request) {
 		ReviewCount int     `json:"review_count"`
 	}
 	agg := make(map[string]*modelAgg)
+	// addModel attributes one leg's spend to its model. When the bucket
+	// carries an Aux ledger (mixed Jev+LLM spend), the headline numerics are
+	// the stage total across legs — crediting them to the headline model
+	// would double-count. Aux entries carry per-leg provenance instead.
+	addModel := func(st pipeline.StageTokens) {
+		if len(st.Aux) > 0 {
+			for _, leg := range st.Aux {
+				if leg.Model == "" {
+					continue
+				}
+				a, ok := agg[leg.Model]
+				if !ok {
+					a = &modelAgg{Model: leg.Model}
+					agg[leg.Model] = a
+				}
+				a.TotalTokens += leg.TotalTokens
+				a.TotalCost += leg.Cost
+			}
+			return
+		}
+		if st.Model == "" || st.TotalTokens == 0 {
+			return
+		}
+		a, ok := agg[st.Model]
+		if !ok {
+			a = &modelAgg{Model: st.Model}
+			agg[st.Model] = a
+		}
+		a.TotalTokens += st.TotalTokens
+		a.TotalCost += st.Cost
+	}
 
 	for _, raw := range rawRows {
 		var usage pipeline.RunTokenUsage
@@ -206,45 +237,26 @@ func (s *Server) statsModels(w http.ResponseWriter, r *http.Request) {
 			s.logger.WarnContext(r.Context(), "skipping malformed token_usage in model stats", "error", err)
 			continue
 		}
-		// Aggregate all stages that have a model set
-		stages := []pipeline.StageTokens{usage.Triage, usage.Scoring, usage.Synthesis, usage.Enrichment, usage.Conventions, usage.Patterns, usage.Graph}
+		// Aggregate every scalar stage bucket — including the Jev surfaces
+		// (intent verify, auto-resolve judge) and the async stages.
+		stages := []pipeline.StageTokens{
+			usage.Intent, usage.Triage, usage.Scoring, usage.Synthesis,
+			usage.Enrichment, usage.Conventions, usage.Patterns, usage.Graph,
+			usage.LeadAgent, usage.Acceptance, usage.CrossPR, usage.AutoResolve,
+			usage.Reply,
+		}
 		for _, st := range stages {
-			if st.Model == "" || st.TotalTokens == 0 {
-				continue
-			}
-			a, ok := agg[st.Model]
-			if !ok {
-				a = &modelAgg{Model: st.Model}
-				agg[st.Model] = a
-			}
-			a.TotalTokens += st.TotalTokens
-			a.TotalCost += st.Cost
+			addModel(st)
 		}
-		// Review stage is an array
+		// Review and FileSynthesis stages are arrays
 		for _, st := range usage.Review {
-			if st.Model == "" || st.TotalTokens == 0 {
-				continue
-			}
-			a, ok := agg[st.Model]
-			if !ok {
-				a = &modelAgg{Model: st.Model}
-				agg[st.Model] = a
-			}
-			a.TotalTokens += st.TotalTokens
-			a.TotalCost += st.Cost
+			addModel(st)
 		}
-		// FileSynthesis array
 		for _, st := range usage.FileSynthesis {
-			if st.Model == "" || st.TotalTokens == 0 {
-				continue
-			}
-			a, ok := agg[st.Model]
-			if !ok {
-				a = &modelAgg{Model: st.Model}
-				agg[st.Model] = a
-			}
-			a.TotalTokens += st.TotalTokens
-			a.TotalCost += st.Cost
+			addModel(st)
+		}
+		for _, st := range usage.Simulation {
+			addModel(st)
 		}
 		// Count unique reviews per model — track via triage model as primary
 		if usage.Triage.Model != "" {

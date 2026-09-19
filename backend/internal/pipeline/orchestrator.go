@@ -2319,14 +2319,11 @@ func (o *Orchestrator) verifyIntent(ctx context.Context, run *PipelineRun) *Inte
 }
 
 // recordIntentTokens bills one intent-stage call (LLM or Jev) into the Intent
-// bucket and the run total. Model/Provider re-stamp on every call that carries
-// them — the deciding leg always bills last, so the bucket names whoever did
-// the work, not whoever ran first.
+// bucket and the run total. Each leg lands in the aux ledger; Model/Provider
+// re-stamp on every call that carries them — the deciding leg always bills
+// last, so the bucket names whoever did the work, not whoever ran first.
 func (o *Orchestrator) recordIntentTokens(run *PipelineRun, tokens StageTokens) {
-	run.Tokens.Intent.PromptTokens += tokens.PromptTokens
-	run.Tokens.Intent.CompletionTokens += tokens.CompletionTokens
-	run.Tokens.Intent.TotalTokens += tokens.TotalTokens
-	run.Tokens.Intent.Cost += tokens.Cost
+	foldAuxTokens(&run.Tokens.Intent, tokens)
 	if tokens.Model != "" {
 		run.Tokens.Intent.Model = tokens.Model
 		run.Tokens.Intent.Provider = tokens.Provider
@@ -2336,12 +2333,10 @@ func (o *Orchestrator) recordIntentTokens(run *PipelineRun, tokens StageTokens) 
 
 // recordConventionTokens bills one convention-classifier call (LLM or Jev)
 // into the Conventions bucket — accumulates onto the extraction spend already
-// billed there; Model/Provider re-stamp per call (same last-writer rule).
+// billed there; Model/Provider re-stamp per call (same last-writer rule) and
+// every leg joins the aux ledger.
 func (o *Orchestrator) recordConventionTokens(run *PipelineRun, tokens StageTokens) {
-	run.Tokens.Conventions.PromptTokens += tokens.PromptTokens
-	run.Tokens.Conventions.CompletionTokens += tokens.CompletionTokens
-	run.Tokens.Conventions.TotalTokens += tokens.TotalTokens
-	run.Tokens.Conventions.Cost += tokens.Cost
+	foldAuxTokens(&run.Tokens.Conventions, tokens)
 	if tokens.Model != "" {
 		run.Tokens.Conventions.Model = tokens.Model
 		run.Tokens.Conventions.Provider = tokens.Provider
@@ -3992,7 +3987,10 @@ func normalizeConventionCategory(raw string) string {
 var conventionPromptTags = []string{"candidate_convention", "existing_convention"}
 
 func conventionPromptField(tag, value string) string {
-	value = strings.ReplaceAll(sanitizeUserInput(value), "\x00", "")
+	// Conventions are retrieved memory — use the unanchored memory sanitizer,
+	// not the line-anchored user-input one: a stored directive stacked mid-line
+	// would otherwise reach the prompt intact.
+	value = strings.ReplaceAll(sanitizeRetrievedMemory(value), "\x00", "")
 	for _, promptTag := range conventionPromptTags {
 		value = scrubDelimiterToken(promptTag, value)
 	}
@@ -4128,7 +4126,7 @@ Return [] if no clear conventions emerge. JSON array only.`, run.PREvent.RepoFul
 		o.logger.Warn("convention extraction LLM failed", "error", err)
 		return
 	}
-	run.Tokens.Conventions = StageTokens{
+	extraction := StageTokens{
 		PromptTokens:     resp.TokensUsed.PromptTokens,
 		CompletionTokens: resp.TokensUsed.CompletionTokens,
 		TotalTokens:      resp.TokensUsed.TotalTokens,
@@ -4136,7 +4134,11 @@ Return [] if no clear conventions emerge. JSON array only.`, run.PREvent.RepoFul
 		Model:            cfg.Model,
 		Provider:         cfg.Provider,
 	}
-	run.Tokens.addToTotal(run.Tokens.Conventions)
+	// Fresh bucket — fold so the extraction leg seeds the aux ledger the
+	// relation classifier (Jev or LLM) appends to below.
+	run.Tokens.Conventions = StageTokens{}
+	foldAuxTokens(&run.Tokens.Conventions, extraction)
+	run.Tokens.addToTotal(extraction)
 
 	conventions, err := unmarshalLLMArray[conventionCandidate](resp.Content)
 	if err != nil {

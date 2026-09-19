@@ -40,6 +40,9 @@ var AllowedKeys = map[string]struct{}{
 	// jev shadow-mode agreement (jev.shadow.* events) — per-file classifier
 	// agreement counts with the production pipeline. Non-PII scalars.
 	"agreed": {}, "disagreed": {}, "unanswered": {},
+	// jev.state.oversized — Jev request state exceeded the size cap. Counts
+	// only; no prompt content.
+	"state_bytes": {}, "cap_bytes": {}, "question_count": {},
 	// incremental re-review fallback signal (incremental.fallback event) — commit
 	// SHAs are non-PII and pin which push turned an incremental into a full run.
 	"previous_head": {}, "new_head": {},

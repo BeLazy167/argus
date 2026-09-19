@@ -145,3 +145,69 @@ func TestAutoResolveBucketSurvivesJSONRoundTrip(t *testing.T) {
 // compile-time guard: the persist path speaks the sqlc params type, so a rename
 // on the query side breaks here rather than at runtime in a detached goroutine.
 var _ = db.MergeStageTokenEntryParams{StageKey: stageKeyAutoResolve}
+
+// TestFoldAuxTokens_MixedBucketSemantics pins the provenance contract: bucket
+// numerics are the stage TOTAL, the headline names the deciding leg, and every
+// leg keeps its own model/provider in Aux so stats can split the spend.
+func TestFoldAuxTokens_MixedBucketSemantics(t *testing.T) {
+	var bucket StageTokens
+	jevLeg := StageTokens{PromptTokens: 400, TotalTokens: 400, Cost: 0.0001, Model: "jev-1.13.0", Provider: "typesafe"}
+	llmLeg := StageTokens{PromptTokens: 1000, CompletionTokens: 100, TotalTokens: 1100, Cost: 0.002, Model: "gpt-x", Provider: "openrouter"}
+
+	// Jev leg first (pre-filter/shadow order): provisional headline.
+	foldAuxTokens(&bucket, jevLeg)
+	if bucket.Model != "jev-1.13.0" || bucket.Provider != "typesafe" {
+		t.Fatalf("empty bucket must take the first leg's stamp: %+v", bucket)
+	}
+	// Deciding LLM leg folds in and takes the headline explicitly.
+	foldAuxTokens(&bucket, llmLeg)
+	bucket.Model, bucket.Provider = llmLeg.Model, llmLeg.Provider
+
+	if bucket.TotalTokens != 1500 || bucket.Cost < 0.0021-1e-9 || bucket.Cost > 0.0021+1e-9 {
+		t.Fatalf("bucket numerics must be the stage total: %+v", bucket)
+	}
+	if len(bucket.Aux) != 2 || bucket.Aux[0].Model != "jev-1.13.0" || bucket.Aux[1].Model != "gpt-x" {
+		t.Fatalf("aux ledger must carry both legs' provenance: %+v", bucket.Aux)
+	}
+	if bucket.Model != "gpt-x" {
+		t.Fatalf("deciding leg must own the headline: %+v", bucket)
+	}
+
+	// Zero-spend entries (failed evals) fold nothing and record no aux row.
+	before := len(bucket.Aux)
+	foldAuxTokens(&bucket, StageTokens{Model: "jev-1.13.0", Provider: "typesafe"})
+	if len(bucket.Aux) != before || bucket.TotalTokens != 1500 {
+		t.Fatalf("zero-spend fold must be a no-op: %+v", bucket)
+	}
+}
+
+// TestAutoResolve_AuxRecordsMixedLegs proves a Jev+LLM push keeps both legs'
+// spend attributable: 9 Jev decisions + 1 LLM escalation must not render as
+// one model's bucket.
+func TestAutoResolve_AuxRecordsMixedLegs(t *testing.T) {
+	var r RunTokenUsage
+	jevSpend := StageTokens{PromptTokens: 100, TotalTokens: 100, Cost: 0.00001, Model: "jev-1.13.0", Provider: "typesafe"}
+	for i := 0; i < 9; i++ {
+		r.addAutoResolve(jevSpend)
+	}
+	r.addAutoResolve(perCallSpend) // judge-model/openai — the escalation leg
+
+	if r.AutoResolve.TotalTokens != 9*100+perCallSpend.TotalTokens {
+		t.Fatalf("bucket total = %d, want all legs summed", r.AutoResolve.TotalTokens)
+	}
+	if len(r.AutoResolve.Aux) != 10 {
+		t.Fatalf("aux ledger = %d entries, want one per call", len(r.AutoResolve.Aux))
+	}
+	var jevTokens, llmTokens int
+	for _, leg := range r.AutoResolve.Aux {
+		switch leg.Provider {
+		case "typesafe":
+			jevTokens += leg.TotalTokens
+		case "openai":
+			llmTokens += leg.TotalTokens
+		}
+	}
+	if jevTokens != 900 || llmTokens != perCallSpend.TotalTokens {
+		t.Fatalf("aux split = jev:%d llm:%d, want 900/%d", jevTokens, llmTokens, perCallSpend.TotalTokens)
+	}
+}

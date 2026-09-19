@@ -76,6 +76,17 @@ func jevConventionState(candidate string, neighbors []memory.PatternMatch) map[s
 // neighbors. Returns ok=false when anything is uncertain, missing, or
 // malformed — the caller then runs the LLM classifier exactly as before.
 func (o *Orchestrator) jevConventionRelations(ctx context.Context, j jevEvaluator, candidate string, neighbors []memory.PatternMatch) ([]conventionRelationResult, StageTokens, bool) {
+	// A convention longer than the field cap would be truncated in state —
+	// a confident verdict on partial text could supersede or file a conflict
+	// on an incomplete rule. Escalate instead; the LLM prompt sees full text.
+	if len(candidate) > jevConventionFieldCap {
+		return nil, StageTokens{}, false
+	}
+	for _, n := range neighbors {
+		if len(n.Content) > jevConventionFieldCap {
+			return nil, StageTokens{}, false
+		}
+	}
 	jevCtx, cancel := context.WithTimeout(ctx, jevEvalTimeout)
 	res, err := j.Evaluate(jevCtx, jevConventionState(candidate, neighbors), jevConventionQuestions(neighbors), "convention_conflicts")
 	cancel()
