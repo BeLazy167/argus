@@ -14,7 +14,6 @@ package pipeline
 import (
 	"context"
 	"log/slog"
-	"net/url"
 
 	"github.com/BeLazy167/argus/backend/internal/jev"
 	"github.com/BeLazy167/argus/backend/internal/store"
@@ -56,7 +55,7 @@ func resolveJevEvaluator(ctx context.Context, keys jevKeyResolver, env jevEvalua
 				"error", err, "installation_id", installationID, "repo_id", rid, "provider", jev.ProviderName)
 		case found && key != "":
 			if baseURL != "" {
-				if validJevBaseURL(baseURL) {
+				if jev.ValidBaseURL(baseURL) {
 					return jev.NewClient(key, jev.WithBaseURL(baseURL))
 				}
 				// A malformed stored endpoint (typo, scheme-less host) would
@@ -72,14 +71,6 @@ func resolveJevEvaluator(ctx context.Context, keys jevKeyResolver, env jevEvalua
 		return env
 	}
 	return nil
-}
-
-// validJevBaseURL accepts only absolute http(s) URLs with a host — the stored
-// value names an egress endpoint for tenant code, so anything else (bare
-// hosts, paths without scheme, non-http schemes) is rejected.
-func validJevBaseURL(raw string) bool {
-	u, err := url.Parse(raw)
-	return err == nil && (u.Scheme == "https" || u.Scheme == "http") && u.Host != ""
 }
 
 // jevStageTokens converts one eval result into spend for the caller's stage

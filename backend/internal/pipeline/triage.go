@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/BeLazy167/argus/backend/internal/llm"
 	"github.com/BeLazy167/argus/backend/internal/memory"
@@ -41,6 +42,10 @@ type TriageStage struct {
 	// jev, when non-nil, runs a shadow eval that logs agreement with the
 	// pipeline's final triage decisions — observe-only, never routes files.
 	jev jevEvaluator
+	// joinBudget/drainBudget override the shadow join windows — tests set
+	// millisecond values so they don't pay the production budgets.
+	joinBudget  time.Duration
+	drainBudget time.Duration
 }
 
 func NewTriageStage(registry *llm.Registry, st *store.Store) *TriageStage {

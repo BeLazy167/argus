@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	ghpkg "github.com/BeLazy167/argus/backend/internal/github"
@@ -46,13 +47,14 @@ func (f *fakeJevKeyResolver) ResolveAPIKey(_ context.Context, _ int64, repoID *i
 
 // jevCapture starts a server that records the bearer token of each eval. The
 // resolved *jev.Client hides its key, so the auth header is the only way to
-// prove which stored row built it.
-func jevCapture(t *testing.T) (baseURL string, auth *string, hits *int) {
+// prove which stored row built it. Writes happen on the server goroutine, so
+// the counters are atomic — a plain var trips -race.
+func jevCapture(t *testing.T) (baseURL string, auth *atomic.Value, hits *atomic.Int64) {
 	t.Helper()
-	a, n := "", 0
+	a, n := &atomic.Value{}, &atomic.Int64{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		n++
-		a = r.Header.Get("Authorization")
+		n.Add(1)
+		a.Store(r.Header.Get("Authorization"))
 		if r.URL.Path != "/v1/systemone" {
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
@@ -65,7 +67,7 @@ func jevCapture(t *testing.T) (baseURL string, auth *string, hits *int) {
 		})
 	}))
 	t.Cleanup(srv.Close)
-	return srv.URL, &a, &n
+	return srv.URL, a, n
 }
 
 // repoID9 is the repo-context arg shared by every call.
@@ -112,8 +114,8 @@ func TestResolveJevEvaluator_RepoKeyWinsOverInstallation(t *testing.T) {
 		t.Fatal("stored key must resolve an evaluator")
 	}
 	evalOnce(t, ev)
-	if *auth != "Bearer ts-repo" {
-		t.Fatalf("repo-level key must win, got auth %q", *auth)
+	if auth.Load() != "Bearer ts-repo" {
+		t.Fatalf("repo-level key must win, got auth %q", auth.Load())
 	}
 }
 
@@ -125,8 +127,8 @@ func TestResolveJevEvaluator_InstallationFallback(t *testing.T) {
 		t.Fatal("installation-level key must resolve when no repo row exists")
 	}
 	evalOnce(t, ev)
-	if *auth != "Bearer ts-inst" {
-		t.Fatalf("installation-level key must be used, got auth %q", *auth)
+	if auth.Load() != "Bearer ts-inst" {
+		t.Fatalf("installation-level key must be used, got auth %q", auth.Load())
 	}
 }
 
@@ -138,8 +140,8 @@ func TestResolveJevEvaluator_BaseURLPassthrough(t *testing.T) {
 		t.Fatal("stored key must resolve an evaluator")
 	}
 	evalOnce(t, ev)
-	if *hits != 1 {
-		t.Fatalf("stored base_url not applied — custom endpoint saw %d requests", *hits)
+	if hits.Load() != 1 {
+		t.Fatalf("stored base_url not applied — custom endpoint saw %d requests", hits.Load())
 	}
 }
 
@@ -197,11 +199,11 @@ func TestResolveJevEvaluator_NoKeyNoEnvOrFlagIsNil(t *testing.T) {
 // thread, and the LLM judge never runs. Covers the wrap branch a nil-store
 // harness cannot reach.
 func TestResolveCandidates_BYOKSelectsJevCascade(t *testing.T) {
-	var auth string
-	var hits int
+	var auth atomic.Value
+	var hits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits++
-		auth = r.Header.Get("Authorization")
+		hits.Add(1)
+		auth.Store(r.Header.Get("Authorization"))
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"model": "jev-1.13.0",
@@ -222,10 +224,10 @@ func TestResolveCandidates_BYOKSelectsJevCascade(t *testing.T) {
 	stats, _ := o.resolveCandidates(t.Context(),
 		ghpkg.PREvent{InstallationID: 9, PRNumber: 1}, "o", "r", threads, nil, patch, 1, 2)
 
-	if hits != 1 {
-		t.Fatalf("BYOK eval must hit the stored endpoint once, got %d", hits)
+	if hits.Load() != 1 {
+		t.Fatalf("BYOK eval must hit the stored endpoint once, got %d", hits.Load())
 	}
-	if auth != "Bearer ts-byok" {
+	if auth.Load() != "Bearer ts-byok" {
 		t.Fatalf("stored key must auth the eval, got %q", auth)
 	}
 	if llmJudge.calls != 0 {

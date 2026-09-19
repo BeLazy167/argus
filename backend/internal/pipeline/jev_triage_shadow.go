@@ -97,17 +97,24 @@ func (ts *TriageStage) finishJevTriageShadow(ctx context.Context, run *PipelineR
 	if s == nil {
 		return
 	}
+	joinBudget, drainBudget := ts.joinBudget, ts.drainBudget
+	if joinBudget <= 0 {
+		joinBudget = jevShadowJoinBudget
+	}
+	if drainBudget <= 0 {
+		drainBudget = jevShadowDrainBudget
+	}
 	var out jevTriageShadowResult
 	select {
 	case out = <-s.ch:
-	case <-time.After(jevShadowJoinBudget):
+	case <-time.After(joinBudget):
 		// Budget spent: cancel the in-flight eval so a dropped comparison
 		// doesn't keep burning spend, then drain briefly — an answer that
 		// lands in this window still bills and still compares.
 		s.cancel()
 		select {
 		case out = <-s.ch:
-		case <-time.After(jevShadowDrainBudget):
+		case <-time.After(drainBudget):
 			slog.InfoContext(ctx, "jev triage shadow abandoned",
 				slog.String("event", "jev.shadow.triage_abandoned"),
 				slog.Int("file_count", len(run.Diff.Files)),

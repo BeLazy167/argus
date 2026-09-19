@@ -131,8 +131,10 @@ func Load() (*Config, error) {
 		EncryptionKey: os.Getenv("ENCRYPTION_KEY"),
 
 		// The TypeSafe SDK spells the var TYPESAFE_AI_API_KEY; accept both so
-		// an operator copying either doc gets a working config.
-		TypeSafeAPIKey: strings.TrimSpace(getEnv("TYPESAFE_API_KEY", os.Getenv("TYPESAFE_AI_API_KEY"))),
+		// an operator copying either doc gets a working config. Trim before
+		// the fallback check — a whitespace-only primary must not shadow a
+		// valid TYPESAFE_AI_API_KEY.
+		TypeSafeAPIKey: firstNonBlankEnv("TYPESAFE_API_KEY", "TYPESAFE_AI_API_KEY"),
 
 		EmbeddingsAPIKey:     os.Getenv("EMBEDDINGS_API_KEY"),
 		EmbeddingsBaseURL:    getEnv("EMBEDDINGS_BASE_URL", "https://api.voyageai.com/v1"),
@@ -162,6 +164,17 @@ func loadPrivateKey() ([]byte, error) {
 		return []byte(key), nil
 	}
 	return nil, fmt.Errorf("set GITHUB_PRIVATE_KEY_PATH or GITHUB_PRIVATE_KEY")
+}
+
+// firstNonBlankEnv returns the first env var whose trimmed value is
+// non-empty — a whitespace-only value must not shadow later candidates.
+func firstNonBlankEnv(names ...string) string {
+	for _, n := range names {
+		if v := strings.TrimSpace(os.Getenv(n)); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func getEnv(key, fallback string) string {

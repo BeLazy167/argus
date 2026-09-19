@@ -12,6 +12,7 @@ import (
 
 	"github.com/BeLazy167/argus/backend/internal/github"
 	"github.com/BeLazy167/argus/backend/internal/jev"
+	"github.com/BeLazy167/argus/backend/pkg/diff"
 )
 
 func f64(v float64) *float64 { return &v }
@@ -27,6 +28,9 @@ func intentRun(nFindings int) *PipelineRun {
 			Source:             IntentSourceAuthor,
 		},
 		PREvent: github.PREvent{PRNumber: 7, PRTitle: "rate limit", PRAuthor: "dev"},
+		Diff: &diff.PatchSet{Files: []diff.FileDiff{
+			{NewName: "mw/limit.go", Status: diff.FileModified},
+		}},
 	}
 	for i := 0; i < nFindings; i++ {
 		run.FileReviews = append(run.FileReviews, FileReview{
@@ -77,6 +81,12 @@ func TestJevIntentVerdict_AllClearConfident(t *testing.T) {
 	criteria, ok := fj.state.(map[string]any)["acceptance_criteria"].([]string)
 	if !ok || len(criteria) != 2 || criteria[0] != "0: limits requests" || criteria[1] != "1: returns 429" {
 		t.Fatalf("acceptance_criteria state = %v, want numbered entries", fj.state)
+	}
+	// files_changed must enumerate the diff — an empty list means the
+	// all-clear answered without seeing what the PR touched.
+	files, ok := fj.state.(map[string]any)["files_changed"].([]string)
+	if !ok || len(files) != 1 || !strings.Contains(files[0], "mw/limit.go") {
+		t.Fatalf("files_changed state = %v, want the diff's files", fj.state)
 	}
 }
 

@@ -86,6 +86,29 @@ func TestJevConventions_OneUncertainEscalatesWholeBatch(t *testing.T) {
 	}
 }
 
+// A partial Answers map (only rel_0 present) must escalate the WHOLE batch —
+// iterating answers instead of neighbors would silently drop neighbor 1.
+func TestJevConventions_MissingAnswerEscalatesWholeBatch(t *testing.T) {
+	fj := &fakeJev{result: choiceResult(
+		choiceAnswer("duplicate", map[string]float64{"duplicate": 0.99}),
+		// rel_1 absent — two neighbors, one answer.
+	)}
+	fp := newFakeLLMProvider()
+	fp.SetContent(`[{"existing_id":"old-1","relation":"duplicate","confidence":0.9},{"existing_id":"old-2","relation":"unrelated","confidence":0.85}]`)
+	o := &Orchestrator{jev: fj, logger: slog.New(slog.DiscardHandler)}
+
+	rel, spend := o.classifyConventionRelations(context.Background(), fp, llm.ModelConfig{Model: "fake"}, "cand", conventionNeighbors(), fj)
+	if fp.calls != 1 {
+		t.Fatalf("missing answer must escalate the batch to the LLM, calls=%d", fp.calls)
+	}
+	if len(rel) != 2 || rel[1].Relation != conventionUnrelated {
+		t.Fatalf("relations = %+v, want LLM results for both neighbors", rel)
+	}
+	if spend.PromptTokens != 923 {
+		t.Fatalf("escalated spend = %+v, want jev+llm summed", spend)
+	}
+}
+
 func TestJevConventions_ErrorEscalates(t *testing.T) {
 	fj := &fakeJev{err: errors.New("jev down")}
 	fp := newFakeLLMProvider()

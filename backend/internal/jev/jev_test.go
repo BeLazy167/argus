@@ -166,20 +166,27 @@ func TestEvaluate_OversizedResponseErrors(t *testing.T) {
 
 func TestResult_NoulChoiceGuards(t *testing.T) {
 	nan := math.NaN()
+	posInf := math.Inf(1)
+	negInf := math.Inf(-1)
 	res := Result{Answers: map[string]Answer{
-		"good":         {Type: TypeNoul, Noul: ptr(0.9)},
-		"out_high":     {Type: TypeNoul, Noul: ptr(1.01)},
-		"out_neg":      {Type: TypeNoul, Noul: ptr(-0.01)},
-		"nan":          {Type: TypeNoul, Noul: &nan},
+		"good":     {Type: TypeNoul, Noul: ptr(0.9)},
+		"out_high": {Type: TypeNoul, Noul: ptr(1.01)},
+		"out_neg":  {Type: TypeNoul, Noul: ptr(-0.01)},
+		"nan":      {Type: TypeNoul, Noul: &nan},
+		// 1e400 decodes to +Inf without a json error — the range guard is
+		// the only thing stopping it clearing a caller's threshold.
+		"pos_inf":      {Type: TypeNoul, Noul: &posInf},
+		"neg_inf":      {Type: TypeNoul, Noul: &negInf},
 		"wrong_type":   {Type: TypeChoice, Choice: "deep", Probabilities: map[string]float64{"deep": 0.9}},
 		"choice_ok":    {Type: TypeChoice, Choice: "deep", Probabilities: map[string]float64{"deep": 0.8, "skim": 0.2}},
 		"choice_nomap": {Type: TypeChoice, Choice: "deep"}, // picked but no probability for it
+		"choice_inf":   {Type: TypeChoice, Choice: "deep", Probabilities: map[string]float64{"deep": posInf}},
 	}}
 
 	if p := res.Noul("good"); p == nil || *p != 0.9 {
 		t.Errorf("noul(good) = %v", p)
 	}
-	for _, id := range []string{"out_high", "out_neg", "nan", "wrong_type", "missing"} {
+	for _, id := range []string{"out_high", "out_neg", "nan", "pos_inf", "neg_inf", "wrong_type", "missing"} {
 		if res.Noul(id) != nil {
 			t.Errorf("noul(%s) must be nil for out-of-range/missing/wrong-type", id)
 		}
@@ -187,7 +194,7 @@ func TestResult_NoulChoiceGuards(t *testing.T) {
 	if c, p, ok := res.Choice("choice_ok"); !ok || c != "deep" || p != 0.8 {
 		t.Errorf("choice(choice_ok) = %q %.2f %v", c, p, ok)
 	}
-	for _, id := range []string{"choice_nomap", "good", "missing"} {
+	for _, id := range []string{"choice_nomap", "choice_inf", "good", "missing"} {
 		if _, _, ok := res.Choice(id); ok {
 			t.Errorf("choice(%s) must fail for missing probability/wrong-type/missing", id)
 		}

@@ -502,11 +502,18 @@ func (s *Server) upsertProviderKey(w http.ResponseWriter, r *http.Request) {
 	if body.Provider == jev.ProviderName && body.BaseURL != nil {
 		// A padded or trailing-slashed endpoint builds //v1/systemone or an
 		// unparseable URL — every eval then errors and silently escalates, so
-		// BYOK Jev is dead for that install. Persist the canonical form.
+		// BYOK Jev is dead for that install. Persist the canonical form, and
+		// reject a non-URL outright instead of saving a dead endpoint.
 		trimmed := strings.TrimRight(strings.TrimSpace(*body.BaseURL), "/")
-		if trimmed == "" {
+		switch {
+		case trimmed == "":
 			body.BaseURL = nil
-		} else {
+		case !jev.ValidBaseURL(trimmed):
+			writeJSON(w, http.StatusBadRequest, map[string]string{
+				"error": "invalid base URL — must be an absolute http(s) URL, e.g. https://api.typesafe.ai",
+			})
+			return
+		default:
 			body.BaseURL = &trimmed
 		}
 	}

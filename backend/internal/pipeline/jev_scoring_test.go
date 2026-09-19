@@ -96,6 +96,9 @@ func TestJevScoringPreFilter_MissingAndBadAnswersKeep(t *testing.T) {
 	res := scoringJevResult(3)
 	delete(res.Answers, "fp_1")                                          // missing fp → keep
 	res.Answers["fp_2"] = jev.Answer{Type: jev.TypeNoul, Noul: f64(1.7)} // out of range → keep
+	// defect_2 must sit below the ceiling — otherwise the defect veto keeps
+	// the finding anyway and the fp-range rejection is never load-bearing.
+	res.Answers["defect_2"] = jev.Answer{Type: jev.TypeNoul, Noul: f64(0.3)}
 	ss := &ScoringStage{jev: &fakeJev{result: res}}
 
 	dropped, _ := ss.jevScoringPreFilter(context.Background(), run, flatIndex(run))

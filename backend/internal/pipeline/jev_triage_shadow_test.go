@@ -175,17 +175,22 @@ func TestJevTriageShadow_ErrorStampsNoProvider(t *testing.T) {
 
 // A shadow slower than the join budget is abandoned — Execute must not wait
 // the full eval timeout when the real leg finished fast. The in-flight eval
-// is cancelled, so a result that never landed can't bill spend later.
+// is cancelled, so a result that never landed can't bill spend later. The
+// budget is injected at milliseconds so the test doesn't pay the production
+// 750ms wall-clock.
 func TestJevTriageShadow_SlowShadowAbandoned(t *testing.T) {
-	fj := &fakeJev{result: triageChoiceResult(1, "deep"), delay: 2 * jevShadowJoinBudget}
-	ts := &TriageStage{jev: fj}
+	const join = 30 * time.Millisecond
+	// Delay sits just past join+drain: the abandon path is exercised while
+	// the shadow goroutine still exits shortly after the test does.
+	fj := &fakeJev{result: triageChoiceResult(1, "deep"), delay: 2 * join}
+	ts := &TriageStage{jev: fj, joinBudget: join, drainBudget: join / 3}
 	run := triageShadowRun(1)
 
 	s := ts.startJevTriageShadow(context.Background(), run)
 	start := time.Now()
 	ts.finishJevTriageShadow(context.Background(), run, s,
 		map[string]TriageResult{"f0.go": {File: "f0.go", Action: TriageDeep}})
-	if elapsed := time.Since(start); elapsed >= 2*jevShadowJoinBudget {
+	if elapsed := time.Since(start); elapsed >= 2*join {
 		t.Fatalf("join blocked %v, want <= join budget", elapsed)
 	}
 	if run.Tokens.Triage.TotalTokens != 0 {
@@ -198,14 +203,15 @@ func TestJevTriageShadow_SlowShadowAbandoned(t *testing.T) {
 // was already mid-flight must not silently lose its spend.
 // The shadow is constructed directly so the channel timing is deterministic.
 func TestJevTriageShadow_LateResultStillBilled(t *testing.T) {
-	ts := &TriageStage{}
+	const join = 30 * time.Millisecond
+	ts := &TriageStage{joinBudget: join, drainBudget: 10 * join}
 	run := triageShadowRun(1)
 	s := &jevTriageShadow{ch: make(chan jevTriageShadowResult, 1), cancel: func() {}}
 
 	// Deliver just past the join budget: finish's first select times out,
 	// the cancel fires, and the drain window catches the landed answer.
 	go func() {
-		time.Sleep(jevShadowJoinBudget + 20*time.Millisecond)
+		time.Sleep(join + 10*time.Millisecond)
 		s.ch <- jevTriageShadowResult{res: triageChoiceResult(1, "deep")}
 	}()
 	ts.finishJevTriageShadow(context.Background(), run, s,

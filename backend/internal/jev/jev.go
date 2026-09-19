@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/BeLazy167/argus/backend/internal/obs"
@@ -215,6 +216,19 @@ func (c *Client) Evaluate(ctx context.Context, state any, questions map[string]Q
 			slog.Int("question_count", len(questions)),
 			slog.String("trace_id", obs.TraceID(ctx)),
 		)
+		// Emit the same failure record every other error path does —
+		// oversized calls must be visible in jev.call.* telemetry parity.
+		slog.ErrorContext(ctx, "jev call failed",
+			slog.String("event", "jev.call.failed"),
+			slog.String("operation_id", operationID),
+			slog.String("provider", "typesafe"),
+			slog.String("model", c.model),
+			slog.String("stage", stage),
+			slog.String("error", "state too large"),
+			slog.Int("state_bytes", len(stateJSON)),
+			slog.Int64("duration_ms", time.Since(start).Milliseconds()),
+			slog.String("trace_id", obs.TraceID(ctx)),
+		)
 		return Result{}, fmt.Errorf("state too large: %d bytes > %d", len(stateJSON), maxStateBytes)
 	}
 	body := evalRequest{Model: c.model, State: json.RawMessage(stateJSON), Questions: questions}
@@ -260,6 +274,14 @@ func (c *Client) Evaluate(ctx context.Context, state any, questions map[string]Q
 		slog.String("trace_id", obs.TraceID(ctx)),
 	)
 	return res, nil
+}
+
+// ValidBaseURL accepts only absolute http(s) URLs with a host — the stored
+// value names an egress endpoint for tenant code, so anything else (bare
+// hosts, paths without scheme, non-http schemes) is rejected.
+func ValidBaseURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && (u.Scheme == "https" || u.Scheme == "http") && u.Host != ""
 }
 
 // evaluate is the untyped inner call (telemetry lives in Evaluate; the body
