@@ -1,17 +1,6 @@
 import type { Metadata } from "next";
 import { LastUpdated } from "@/components/seo/last-updated";
 
-/** Small inline tag marking a feature that only unlocks on the Pro plan.
- * Styled to match the tactical-terminal aesthetic — amber outline, mono,
- * uppercase — and sits next to section headings, not on its own line. */
-function ProTag() {
-	return (
-		<span className="ml-2 align-middle inline-flex items-center border border-amber/50 bg-amber/10 px-1.5 py-0.5 text-[9px] font-mono font-semibold uppercase tracking-[0.16em] text-amber">
-			Pro
-		</span>
-	);
-}
-
 export const metadata: Metadata = {
 	title: "Memory tuning — Argus docs",
 	description:
@@ -22,7 +11,7 @@ export default function MemoryTuningPage() {
 	return (
 		<article className="space-y-6">
 			<h1 className="text-2xl font-mono text-slate-100">Memory tuning</h1>
-			<LastUpdated date="2026-04-19" />
+			<LastUpdated date="2026-09-20" />
 
 			<p>
 				Argus remembers things across reviews. Confirmed patterns, known scenarios, dismissed
@@ -35,9 +24,12 @@ export default function MemoryTuningPage() {
 				Defaults work for most teams. Tune when you observe specific failure modes in your reviews.
 			</p>
 			<p className="text-[12px] text-slate-500">
-				Settings marked <ProTag /> only affect reviews on the Pro plan (deep-review specialists,
-				scenarios, simulation). Free-tier installations can view and set them, but the associated
-				pipeline stages don&apos;t run.
+				Two gates only matter when the matching pipeline features are on:{" "}
+				<code className="bg-slate-900 px-1 text-amber">specialist_min</code> feeds the Deep Review
+				specialists, and <code className="bg-slate-900 px-1 text-amber">scenario_trigger</code>{" "}
+				feeds Simulation. Both are off by default — enable them under{" "}
+				<strong className="text-slate-200">Settings → Org Defaults → Pipeline Features</strong>{" "}
+				before tuning their gates.
 			</p>
 
 			<h2 className="text-lg font-mono text-slate-100 pt-4">Where to tune</h2>
@@ -52,92 +44,86 @@ export default function MemoryTuningPage() {
 			<p>
 				Each gate is a similarity cutoff in{" "}
 				<code className="bg-slate-900 px-1 text-amber">[0, 1]</code>. Higher = stricter (fewer but
-				more relevant matches). Lower = more permissive (more context, more noise).
+				more relevant matches). Lower = more permissive (more context, more noise). Scores are raw
+				cosine similarity over the configured embedding space — they sit high, so the defaults
+				are higher than intuition suggests. An explicit{" "}
+				<code className="bg-slate-900 px-1 text-amber">0</code> disables that gate entirely.
 			</p>
 
 			<h3 className="text-base font-mono text-slate-100 pt-3">finding_enrich</h3>
 			<p>
-				Default <code className="bg-slate-900 px-1 text-amber">0.50</code>. Controls whether a
+				Default <code className="bg-slate-900 px-1 text-amber">0.70</code>. Controls whether a
 				pattern match enriches a review comment with &quot;we&apos;ve seen this before&quot;
-				context.
+				context. The most recall-oriented gate — a miss costs context, a false hit costs one noisy
+				line.
 			</p>
 			<ul className="list-disc pl-5 space-y-1 text-slate-400">
 				<li>
-					<strong className="text-slate-200">Raise</strong> (e.g. 0.65) if you see unrelated
+					<strong className="text-slate-200">Raise</strong> (e.g. 0.80) if you see unrelated
 					patterns cited on unrelated findings — the match is too loose.
 				</li>
 				<li>
-					<strong className="text-slate-200">Lower</strong> (e.g. 0.40) if you have a mature pattern
+					<strong className="text-slate-200">Lower</strong> (e.g. 0.60) if you have a mature pattern
 					library but reviews rarely cite anything — the gate is too strict.
 				</li>
 			</ul>
 
-			<h3 className="text-base font-mono text-slate-100 pt-3">
-				specialist_min
-				<ProTag />
-			</h3>
+			<h3 className="text-base font-mono text-slate-100 pt-3">specialist_min</h3>
 			<p>
-				Default <code className="bg-slate-900 px-1 text-amber">0.60</code>. Server-side similarity
+				Default <code className="bg-slate-900 px-1 text-amber">0.80</code>. Server-side similarity
 				cutoff for the <strong className="text-slate-200">deep review</strong> specialists (bug
 				hunter, security, architecture, regression). Controls which patterns/scenarios/feedback they
-				see per file.
+				see per file — stricter than finding_enrich because irrelevant noise dilutes a specialist&apos;s
+				prompt budget.
 			</p>
 			<ul className="list-disc pl-5 space-y-1 text-slate-400">
 				<li>
-					<strong className="text-slate-200">Raise</strong> if specialist prompts feel noisy —
-					irrelevant past findings diluting the signal.
+					<strong className="text-slate-200">Raise</strong> (e.g. 0.90) if specialist prompts feel
+					noisy — irrelevant past findings diluting the signal.
 				</li>
 				<li>
-					<strong className="text-slate-200">Lower</strong> for small repos where the pattern
-					library is still thin and you want specialists to reach further.
+					<strong className="text-slate-200">Lower</strong> (e.g. 0.70) for small repos where the
+					pattern library is still thin and you want specialists to reach further.
 				</li>
 			</ul>
 
-			<h3 className="text-base font-mono text-slate-100 pt-3">
-				scenario_trigger
-				<ProTag />
-			</h3>
+			<h3 className="text-base font-mono text-slate-100 pt-3">scenario_trigger</h3>
 			<p>
-				Default <code className="bg-slate-900 px-1 text-amber">0.75</code>. When a simulation fails
+				Default <code className="bg-slate-900 px-1 text-amber">0.90</code>. When a simulation fails
 				against a known scenario, this is the minimum similarity for it to count as
 				&quot;triggered&quot; and bump the scenario&apos;s trigger count (used to prioritize
 				long-standing issues).
 			</p>
 			<ul className="list-disc pl-5 space-y-1 text-slate-400">
 				<li>
-					<strong className="text-slate-200">Raise</strong> if scenarios are getting credit for
-					tangential simulation failures.
+					<strong className="text-slate-200">Raise</strong> (e.g. 0.95) if scenarios are getting
+					credit for tangential simulation failures.
 				</li>
 				<li>
-					<strong className="text-slate-200">Lower</strong> if known scenarios are clearly related
-					to failures but not being counted.
+					<strong className="text-slate-200">Lower</strong> (e.g. 0.80) if known scenarios are
+					clearly related to failures but not being counted.
 				</li>
 			</ul>
 
-			<h3 className="text-base font-mono text-slate-100 pt-3">
-				scenario_dedupe
-				<ProTag />
-			</h3>
+			<h3 className="text-base font-mono text-slate-100 pt-3">scenario_dedupe</h3>
 			<p>
-				Default <code className="bg-slate-900 px-1 text-amber">0.85</code>. When a new candidate
+				Default <code className="bg-slate-900 px-1 text-amber">0.95</code>. When a new candidate
 				scenario is extracted, any existing scenario above this similarity counts as a duplicate and
-				the new one is skipped.
+				the new one is skipped. It sits in the top decile on purpose — genuine duplicates score
+				near 1.0, and a lower bar silently merges distinct scenarios.
 			</p>
 			<ul className="list-disc pl-5 space-y-1 text-slate-400">
 				<li>
-					<strong className="text-slate-200">Raise</strong> if you&apos;re seeing distinct scenarios
-					silently merged.
+					<strong className="text-slate-200">Raise</strong> (e.g. 0.98) if you&apos;re seeing
+					distinct scenarios silently merged.
 				</li>
 				<li>
-					<strong className="text-slate-200">Lower</strong> if your scenarios list has obvious
-					duplicates accumulating.
+					<strong className="text-slate-200">Lower</strong> (e.g. 0.90) if your scenarios list has
+					obvious duplicates accumulating.
 				</li>
 			</ul>
 
-			<h2 className="text-lg font-mono text-slate-100 pt-4">
-				Shared-container retirement
-				<ProTag />
-			</h2>
+			<h2 className="text-lg font-mono text-slate-100 pt-4">Shared-container retirement</h2>
 			<p>
 				Some patterns apply across every repo in your org — conventions auto-learned from developer
 				replies, for example. Those live in a shared container that, without any cleanup, would grow
@@ -183,7 +169,7 @@ export default function MemoryTuningPage() {
 				line each time it&apos;s evaluated in the pipeline:
 			</p>
 			<pre className="bg-slate-900 p-3 text-xs overflow-x-auto text-slate-300">
-				{`INFO threshold_check name=scenario_trigger value=0.81 threshold=0.75 passed=true`}
+				{`INFO threshold_check name=scenario_trigger value=0.91 threshold=0.90 passed=true`}
 			</pre>
 			<p>
 				Trace these in your observability stack after changing{" "}
@@ -202,13 +188,14 @@ export default function MemoryTuningPage() {
 
 			<h2 className="text-lg font-mono text-slate-100 pt-4">Safe defaults</h2>
 			<p>
-				If you&apos;re unsure, don&apos;t tune. The defaults are chosen to work well on mid-sized
-				repos with a moderate pattern library. Start with defaults, observe for 2–3 weeks, then tune
-				only the specific gate that&apos;s misfiring.
+				If you&apos;re unsure, don&apos;t tune. The defaults are calibrated against measured
+				similarity distributions on real review corpora. Start with defaults, observe for 2–3
+				weeks, then tune only the specific gate that&apos;s misfiring.
 			</p>
 			<p>
-				Settings are per-installation. Cross-repo overrides (per-repo threshold tuning) are on the
-				roadmap but not yet shipped — today all repos under one installation share the same gates.
+				The dashboard sets these per-installation — all repos under one installation share the same
+				gates. The repo-level settings schema accepts the same keys if you need a per-repo override
+				via the API.
 			</p>
 		</article>
 	);

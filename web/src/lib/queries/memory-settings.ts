@@ -20,10 +20,10 @@ export type MemorySettings = {
 
 /** Hardcoded defaults mirrored from backend/internal/memory/thresholds.go. */
 export const MEMORY_DEFAULTS = {
-	threshold_finding_enrich: 0.5,
-	threshold_specialist_min: 0.6,
-	threshold_scenario_trigger: 0.75,
-	threshold_scenario_dedupe: 0.85,
+	threshold_finding_enrich: 0.7,
+	threshold_specialist_min: 0.8,
+	threshold_scenario_trigger: 0.9,
+	threshold_scenario_dedupe: 0.95,
 	disable_shared_decay: false,
 } as const;
 
