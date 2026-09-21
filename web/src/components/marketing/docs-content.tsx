@@ -58,35 +58,35 @@ import {
 /* ── Section data ── */
 
 const SECTIONS = [
-  { id: "getting-started", label: "Getting Started" },
-  { id: "pipeline", label: "The Review Pipeline" },
-  { id: "review-contract", label: "The Review Contract" },
-  { id: "review-laws", label: "Review Laws" },
-  { id: "deep-review", label: "Deep Review" },
-  { id: "incremental-reviews", label: "Incremental Reviews" },
-  { id: "what-argus-sees", label: "What Argus Sees" },
-  { id: "architecture-viz", label: "Architecture Visualization" },
-  { id: "code-simulation", label: "Code Simulation" },
-  { id: "pr-enrichment", label: "PR Enrichment & Diagrams" },
-  { id: "conversational-review", label: "Conversational Review" },
-  { id: "live-timeline", label: "Live Activity Timeline" },
-  { id: "severities", label: "Severities" },
-  { id: "categories", label: "Categories" },
-  { id: "rules", label: "Review Rules" },
-  { id: "models", label: "Model Config" },
-  { id: "api-keys", label: "API Keys (BYOK)" },
-  { id: "memory-storage", label: "Memory storage" },
-  { id: "personas", label: "Review Personas" },
-  { id: "auto-review", label: "Auto-review & Triggers" },
-  { id: "commands", label: "Bot Commands" },
-  { id: "test-generation", label: "Test Generation" },
-  { id: "memory", label: "Memory & Learning" },
-  { id: "glass-box", label: "Glass Box & Gauge" },
-  { id: "insights", label: "Insights & Risk" },
-  { id: "token-tracking", label: "Token & Cost Tracking" },
-  { id: "light-mode", label: "Light Mode" },
-  { id: "feature-flags", label: "Feature Flags" },
-  { id: "settings", label: "Settings & Controls" },
+  { id: "getting-started", label: "Getting Started", group: "Start" },
+  { id: "pipeline", label: "The Review Pipeline", group: "Start" },
+  { id: "review-contract", label: "The Review Contract", group: "Start" },
+  { id: "review-laws", label: "Review Laws", group: "Start" },
+  { id: "deep-review", label: "Deep Review", group: "Review" },
+  { id: "incremental-reviews", label: "Incremental Reviews", group: "Review" },
+  { id: "what-argus-sees", label: "What Argus Sees", group: "Review" },
+  { id: "architecture-viz", label: "Architecture Visualization", group: "Review" },
+  { id: "code-simulation", label: "Code Simulation", group: "Review" },
+  { id: "pr-enrichment", label: "PR Enrichment & Diagrams", group: "Review" },
+  { id: "conversational-review", label: "Conversational Review", group: "Review" },
+  { id: "live-timeline", label: "Live Activity Timeline", group: "Review" },
+  { id: "severities", label: "Severities", group: "Review" },
+  { id: "categories", label: "Categories", group: "Review" },
+  { id: "rules", label: "Review Rules", group: "Configure" },
+  { id: "models", label: "Model Config", group: "Configure" },
+  { id: "api-keys", label: "API Keys (BYOK)", group: "Configure" },
+  { id: "memory-storage", label: "Memory storage", group: "Configure" },
+  { id: "personas", label: "Review Personas", group: "Configure" },
+  { id: "auto-review", label: "Auto-review & Triggers", group: "Configure" },
+  { id: "commands", label: "Bot Commands", group: "Configure" },
+  { id: "test-generation", label: "Test Generation", group: "Configure" },
+  { id: "memory", label: "Memory & Learning", group: "Learn" },
+  { id: "glass-box", label: "Glass Box & Gauge", group: "Learn" },
+  { id: "insights", label: "Insights & Risk", group: "Learn" },
+  { id: "token-tracking", label: "Token & Cost Tracking", group: "Learn" },
+  { id: "light-mode", label: "Light Mode", group: "Administer" },
+  { id: "feature-flags", label: "Feature Flags", group: "Administer" },
+  { id: "settings", label: "Settings & Controls", group: "Administer" },
 ] as const;
 
 const SEVERITIES = [
@@ -198,7 +198,7 @@ const PIPELINE_STAGES = [
     label: "Refine",
     icon: Layers,
     description:
-      "Deduplicates findings, then an LLM judge scores each one against class-aware thresholds — on every review, every plan. Low-signal comments are dropped or folded into a collapsed Minor notes section.",
+      "Deduplicates findings, then an LLM judge scores each one against class-aware thresholds — on every review. Low-signal comments are dropped or folded into a collapsed Minor notes section.",
   },
   {
     step: "05",
@@ -359,8 +359,8 @@ export function DocsContent() {
       </h1>
       <p className="mb-3 text-[11px] font-mono uppercase tracking-[0.18em] text-slate-text/70">
         Last updated{" "}
-        <time dateTime="2026-07-11" className="text-foreground">
-          July 11, 2026
+        <time dateTime="2026-09-20" className="text-foreground">
+          September 20, 2026
         </time>
       </p>
       <p className="text-sm font-mono text-slate-text mb-16 max-w-xl">
@@ -378,13 +378,19 @@ export function DocsContent() {
             <p className="text-[10px] font-mono uppercase tracking-[0.15em] text-iron mb-3">
               On this page
             </p>
-            {SECTIONS.map((s) => (
-              <SidebarLink
-                key={s.id}
-                id={s.id}
-                label={s.label}
-                active={activeSection === s.id}
-              />
+            {SECTIONS.map((s, i) => (
+              <div key={s.id}>
+                {(i === 0 || SECTIONS[i - 1]?.group !== s.group) && (
+                  <p className="text-[9px] font-mono uppercase tracking-[0.18em] text-iron pt-4 pb-1 pl-3 first:pt-0">
+                    {s.group}
+                  </p>
+                )}
+                <SidebarLink
+                  id={s.id}
+                  label={s.label}
+                  active={activeSection === s.id}
+                />
+              </div>
             ))}
           </div>
         </nav>
@@ -411,18 +417,18 @@ export function DocsContent() {
                 },
                 {
                   step: "3",
-                  title: "Add your API key",
-                  desc: "Bring your own key — OpenAI, Anthropic, or any OpenRouter provider. Your key, your costs, your data stays yours.",
+                  title: "Add your API key and models",
+                  desc: "Bring your own key — OpenRouter, OpenAI, Anthropic, or 9 other providers — then pick a model for each pipeline stage in Settings. Argus ships no default model: you choose, you pay your provider directly.",
                 },
                 {
                   step: "4",
                   title: "Open a pull request",
-                  desc: "Every PR triggers Argus automatically. Inline comments appear with one-click suggestion fixes you can commit straight from GitHub.",
+                  desc: "Argus posts a Trigger Argus review checkbox with a cost preview — tick it to run. Turn on Auto-review in Settings to review every PR automatically. Inline comments arrive with one-click suggestion fixes.",
                 },
                 {
                   step: "5",
                   title: "Teach it your standards",
-                  desc: "Choose a review persona, add custom rules, or let Argus learn your team's patterns over time. It gets sharper with every review.",
+                  desc: "Choose a review persona, add org rules, or let Argus learn your team's patterns over time. It gets sharper with every review.",
                 },
               ].map((item) => (
                 <div key={item.step} className="flex gap-4">
@@ -571,7 +577,7 @@ export function DocsContent() {
                 {
                   icon: AlertTriangle,
                   title: "Oversized PRs",
-                  desc: "Beyond reviewable size (~1,500 changed lines or 60 files), Argus still reviews — but posts an honest reduced-confidence note and recommends splitting the PR.",
+                  desc: "Past the soft limit (60 files or 1,500 changed lines by default) Argus reviews the highest-risk files at reduced depth and says so. Past the hard limit (400 files or 20,000 lines) it refuses and recommends splitting. Both limits are tunable in Settings → Limits.",
                 },
               ].map((item) => {
                 const Icon = item.icon;
@@ -610,7 +616,7 @@ export function DocsContent() {
             <SectionHeader id="review-laws" title="Review Laws" />
             <p className="text-xs font-mono text-slate-text mb-3 leading-relaxed">
               The rules every Argus review follows. Non-negotiable, on every
-              plan.
+              review.
             </p>
             <p className="text-xs font-mono text-slate-text mb-8 leading-relaxed">
               Findings are earned, never guaranteed. There is no
@@ -665,13 +671,13 @@ export function DocsContent() {
             </div>
 
             <h3 className="text-sm font-bold text-foreground mb-3">
-              Judge scoring — every review, every plan
+              Judge scoring — every review
             </h3>
             <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
               An LLM judge scores every finding against thresholds
-              conditioned on the change class. Score filtering is not a paid
-              feature &mdash; Pro adds depth (the specialist squad and Pass
-              2), not filtering.
+              conditioned on the change class. Scoring runs on every review
+              &mdash; deep review adds breadth (the specialist squad), not a
+              second filter.
             </p>
             <div className="space-y-3">
               {[
@@ -772,8 +778,11 @@ export function DocsContent() {
               Depth follows the review contract: one-off scripts get a single
               balanced reviewer (correctness + data safety) instead of the
               full squad, and docs/generated changes skip the second pass.
-              Enable Deep Review globally in{" "}
-              <span className="text-amber">Settings &rarr; Features</span>.
+              Enable Deep Review in{" "}
+              <span className="text-amber">
+                Settings &rarr; Org Defaults &rarr; Pipeline Features
+              </span>
+              , or per-repo under Repo Overrides.
               Findings from all four specialists are deduplicated before
               scoring.
             </p>
@@ -809,7 +818,7 @@ export function DocsContent() {
                 {
                   icon: Gauge,
                   title: "Cost reduction",
-                  desc: "Incremental reviews typically use 30\u201370% fewer tokens than a full re-review, depending on how much changed between pushes.",
+                  desc: "Incremental reviews analyze only the delta, so they typically cost far fewer tokens than a full re-review \u2014 the saving scales with how little changed between pushes.",
                 },
               ].map((item) => {
                 const Icon = item.icon;
@@ -833,7 +842,10 @@ export function DocsContent() {
             </div>
 
             <p className="text-[11px] font-mono text-iron mt-4">
-              Force a full re-review with{" "}
+              Incremental mode needs a usable inter-diff from the last
+              completed review. A force-push, a changed base branch, or a
+              failed compare falls back to a full review and says so. Force a
+              full re-review any time with{" "}
               <code className="text-amber bg-iron/40 rounded px-1.5 py-0.5">
                 @argus-eye review --force
               </code>
@@ -1022,96 +1034,72 @@ export function DocsContent() {
               scores tell you how certain the system is.
             </p>
 
-            <TerminalBlock title="argus — simulation output">
+            <TerminalBlock title="argus — simulation results block">
+              <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                Tested 3 scenarios,{" "}
+                <span className="text-foreground font-bold">
+                  2 potential issues found:
+                </span>
+              </p>
+
               {/* Scenario 1 */}
-              <div className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border bg-red-500/20 text-red-400 border-red-500/30">
-                    fails
-                  </span>
-                  <span className="text-[11px] font-mono text-foreground">
-                    Scenario: Concurrent subscription cancellation
-                  </span>
-                  <span className="ml-auto text-[10px] font-mono text-red-400">
-                    confidence 94%
-                  </span>
-                </div>
-                <div className="pl-4 border-l-2 border-red-500/30">
-                  <p className="text-[11px] font-mono text-ash/70 leading-relaxed">
-                    <span className="text-slate-text">Root cause:</span> No
-                    idempotency key on the cancellation path. Two concurrent
-                    requests reach the payment provider — first succeeds, second
-                    throws. DB update runs for both.
-                  </p>
-                  <p className="text-[11px] font-mono text-ash/70 leading-relaxed mt-1">
-                    <span className="text-slate-text">Impact:</span> Double
-                    refund issued. Revenue loss proportional to cancellation
-                    volume.
-                  </p>
-                  <p className="text-[11px] font-mono text-amber/60 leading-relaxed mt-1">
-                    <span className="text-slate-text">Fix:</span> Add mutex or
-                    idempotency key. Wrap call + DB write in a transaction.
-                  </p>
-                </div>
+              <div className="space-y-1.5">
+                <p className="text-[11px] font-mono text-foreground leading-relaxed">
+                  <span className="text-slate-text font-bold">Scenario:</span>{" "}
+                  Concurrent subscription cancellation
+                </p>
+                <p className="text-[11px] font-mono leading-relaxed">
+                  <span className="text-slate-text font-bold">Verdict:</span>{" "}
+                  <span className="text-red-400">Broken</span>{" "}
+                  <span className="text-slate-text">(94% sure)</span>
+                </p>
+                <p className="text-[11px] font-mono text-ash/70 leading-relaxed">
+                  <span className="text-slate-text font-bold">Why:</span> Two
+                  concurrent requests both pass the status check — the second
+                  throws at the provider but the DB update still runs.
+                </p>
+                <p className="text-[11px] font-mono text-ash/70 leading-relaxed">
+                  <span className="text-slate-text font-bold">Fix:</span> Add an
+                  idempotency key and wrap the call + write in a transaction.
+                </p>
               </div>
 
               <div className="border-t border-iron/50" />
 
               {/* Scenario 2 */}
-              <div className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border bg-yellow-500/20 text-yellow-400 border-yellow-500/30">
-                    degrades
-                  </span>
-                  <span className="text-[11px] font-mono text-foreground">
-                    Scenario: Cache key collision under ID reuse
-                  </span>
-                  <span className="ml-auto text-[10px] font-mono text-yellow-400">
-                    confidence 78%
-                  </span>
-                </div>
-                <div className="pl-4 border-l-2 border-yellow-500/30">
-                  <p className="text-[11px] font-mono text-ash/70 leading-relaxed">
-                    <span className="text-slate-text">Root cause:</span>{" "}
-                    Deleted user IDs are recycled. Infinite TTL cache serves
-                    stale data from the previous account holder.
-                  </p>
-                  <p className="text-[11px] font-mono text-ash/70 leading-relaxed mt-1">
-                    <span className="text-slate-text">Impact:</span> Data
-                    leakage between accounts. Severity scales with user churn.
-                  </p>
-                </div>
-              </div>
-
-              <div className="border-t border-iron/50" />
-
-              {/* Scenario 3 */}
-              <div className="space-y-2">
-                <div className="flex items-center gap-2">
-                  <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border bg-green-500/20 text-green-400 border-green-500/30">
-                    passes
-                  </span>
-                  <span className="text-[11px] font-mono text-foreground">
-                    Scenario: Webhook retry under network partition
-                  </span>
-                  <span className="ml-auto text-[10px] font-mono text-green-400">
-                    confidence 91%
-                  </span>
-                </div>
-                <div className="pl-4 border-l-2 border-green-500/30">
-                  <p className="text-[11px] font-mono text-ash/70 leading-relaxed">
-                    <span className="text-slate-text">Result:</span>{" "}
-                    Idempotency key already present on this path. Retry is
-                    safe. No state corruption detected.
-                  </p>
-                </div>
+              <div className="space-y-1.5">
+                <p className="text-[11px] font-mono text-foreground leading-relaxed">
+                  <span className="text-slate-text font-bold">Scenario:</span>{" "}
+                  Cache key collision under ID reuse
+                </p>
+                <p className="text-[11px] font-mono leading-relaxed">
+                  <span className="text-slate-text font-bold">Verdict:</span>{" "}
+                  <span className="text-yellow-400">Partial fix</span>{" "}
+                  <span className="text-slate-text">(78% sure)</span>
+                </p>
+                <p className="text-[11px] font-mono text-ash/70 leading-relaxed">
+                  <span className="text-slate-text font-bold">Why:</span>{" "}
+                  Recycled user IDs can still hit an infinite-TTL cache entry
+                  from the previous account holder.
+                </p>
+                <p className="text-[11px] font-mono text-ash/70 leading-relaxed">
+                  <span className="text-slate-text font-bold">Fix:</span> Scope
+                  cache keys by account epoch or bound the TTL.
+                </p>
               </div>
             </TerminalBlock>
 
             <p className="text-[11px] font-mono text-iron mt-4">
-              Simulation is powered by scenario memory — the richer your
-              review history, the more scenarios Argus can test against.
-              Currently in experimental rollout.
+              Argus simulates up to 5 stored scenarios per PR, ranked by
+              historical usefulness. The review shows only failures at 50%+
+              confidence — when everything passes, the block collapses to one
+              line. Verdicts are Broken, Partial fix, or Unclear; passing
+              scenarios are never listed individually. Requires Deep Review
+              and scenario memory — enable both in{" "}
+              <span className="text-amber">
+                Settings &rarr; Org Defaults &rarr; Pipeline Features
+              </span>
+              .
             </p>
           </div>
 
@@ -1166,8 +1154,14 @@ export function DocsContent() {
             </div>
 
             <p className="text-[11px] font-mono text-iron mt-4">
-              Diagrams render natively on GitHub. Toggle in{" "}
-              <span className="text-amber">Settings &rarr; Features &rarr; PR Enrichment</span>.
+              Diagrams render natively on GitHub. Argus posts at most two per
+              PR, and only when the diff supports them — sequence diagrams
+              need 3+ changed files, dependency diagrams 10+. Toggle in{" "}
+              <span className="text-amber">
+                Settings &rarr; Org Defaults &rarr; Pipeline Features &rarr; PR
+                Enrichment
+              </span>
+              .
             </p>
           </div>
 
@@ -1233,7 +1227,9 @@ export function DocsContent() {
                   </div>
                   <div className="flex items-center gap-4 mt-3 pt-3 border-t border-iron/50">
                     <span className="text-[10px] font-mono text-slate-text">
-                      2 critical &middot; 2 warnings &middot; 4 suggestions
+                      <span className="font-bold">Findings:</span> 2 blocking
+                      &middot; 2 warning &middot; 4 suggestion &middot; 0 praise
+                      &middot; 8 files reviewed
                     </span>
                   </div>
                 </TerminalBlock>
@@ -1251,30 +1247,31 @@ export function DocsContent() {
                 </p>
                 <TerminalBlock title="argus — inline comment">
                   <div className="space-y-2">
-                    <div className="flex items-center gap-2">
-                      <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border bg-red-500/20 text-red-400 border-red-500/30">
-                        critical
-                      </span>
-                      <span className="text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border bg-amber/20 text-amber border-amber/30">
-                        bug
-                      </span>
-                    </div>
-                    <p className="text-[11px] font-mono text-foreground/90 leading-relaxed">
-                      <span className="text-slate-text font-bold">
-                        What:
+                    <p className="text-[11px] font-mono text-foreground leading-relaxed">
+                      {"\uD83D\uDD34"}{" "}
+                      <span className="font-bold">
+                        CRITICAL (9/10) &middot; Bug:
                       </span>{" "}
+                      Double refund on concurrent cancellation
+                    </p>
+                    <p className="text-[11px] font-mono text-foreground/90 leading-relaxed">
                       Two concurrent cancellation requests can both pass the{" "}
                       <code className="text-amber/80">
                         status === &quot;active&quot;
                       </code>{" "}
                       check. First succeeds at the payment provider, second
-                      throws — but the DB update runs for both.
+                      throws — but the DB update runs for both. No lock or
+                      idempotency key on this path; the check-then-act window
+                      is ~200ms under load.
                     </p>
-                    <p className="text-[11px] font-mono text-foreground/90 leading-relaxed">
-                      <span className="text-slate-text font-bold">Why:</span>{" "}
-                      No lock or idempotency key on this path. The check-then-act
-                      window is ~200ms under load. This will cause double
-                      refunds in production.
+                    <p className="text-[11px] font-mono text-slate-text leading-relaxed">
+                      ```suggestion — a GitHub-native suggested change when a
+                      fix is clear. Labeled unverified: Argus does not compile
+                      or run it.
+                    </p>
+                    <p className="text-[10px] font-mono text-iron leading-relaxed">
+                      React {"\uD83D\uDC4E"} to dismiss &middot; Argus learns
+                      from feedback
                     </p>
                   </div>
                 </TerminalBlock>
@@ -1453,81 +1450,78 @@ export function DocsContent() {
             </p>
 
             <h3 className="text-sm font-bold text-foreground mb-3">
-              Org-level rules
+              Org rules
             </h3>
             <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
               Create rules in the dashboard under{" "}
               <span className="text-amber">Rules</span>. Each rule has a
-              category, content, priority, and enabled flag. These apply to
-              all repos in your org.
+              category, free-form content, a priority (low/medium/high), and
+              an enabled flag. Rules are scoped to the installation — they
+              apply to every repo in the org.
             </p>
-
-            <h3 className="text-sm font-bold text-foreground mb-3">
-              Repo-level rules
-            </h3>
             <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
-              Add a{" "}
-              <code className="text-amber bg-iron/40 rounded px-1.5 py-0.5">
-                .argus/rules.md
-              </code>{" "}
-              file to your repo. Repo rules override org rules in the same
-              category.
+              Categories: security, performance, style, testing,
+              documentation, error-handling, accessibility, other.
             </p>
 
-            <CodeBlock>{`## security
-- Always flag hardcoded API keys or secrets
-- Check for SQL injection in raw query strings
+            <CodeBlock>{`category:    security
+priority:    high
+content:     Always flag hardcoded API keys or secrets,
+             and check raw query strings for SQL injection.`}</CodeBlock>
 
-## performance
-- Flag N+1 queries in ORM code
-- Warn about unbounded list fetches without pagination
-
-## testing
-- Require tests for new exported functions
-- Flag test-only helpers imported from production code`}</CodeBlock>
+            <p className="text-[11px] font-mono text-iron mt-4">
+              Rules are managed in the dashboard only — Argus does not read
+              config files from your repo.
+            </p>
           </div>
 
           {/* ── Model Configuration ── */}
           <div>
             <SectionHeader id="models" title="Model Configuration" />
             <p className="text-xs font-mono text-slate-text mb-6 leading-relaxed">
-              All 4 pipeline stages are independently configurable per-repo from
-              the <span className="text-amber">Settings</span> page. Default
-              model depends on your OpenRouter key. Temperature and MaxTokens
-              are adjustable per stage via sliders.
+              Each of the 4 LLM stages — triage, review, scoring, synthesis —
+              takes its own provider, model, endpoint, temperature, and max
+              tokens. Configure org defaults on{" "}
+              <span className="text-amber">Settings &rarr; Org Defaults</span>,
+              override per-repo on{" "}
+              <span className="text-amber">Repo Overrides</span>. A repo
+              config wins over the org default. There is no platform default
+              model &mdash; an unconfigured stage stops the review with a
+              guided setup note rather than silently spending on a model you
+              never chose.
             </p>
 
             <div className="border border-iron bg-charcoal overflow-x-auto">
               <div className="grid grid-cols-2 sm:grid-cols-4 text-[10px] font-mono uppercase tracking-wider text-slate-text border-b border-iron min-w-[480px]">
                 <div className="px-4 py-2.5">Stage</div>
-                <div className="px-4 py-2.5">Default Model</div>
-                <div className="px-4 py-2.5">Max Tokens</div>
-                <div className="px-4 py-2.5">Temperature</div>
+                <div className="px-4 py-2.5">What it does</div>
+                <div className="px-4 py-2.5">Typical call volume</div>
+                <div className="px-4 py-2.5">Tuning lever</div>
               </div>
               {[
                 {
                   stage: "triage",
-                  model: "configurable",
-                  tokens: "configurable",
-                  temp: "configurable",
+                  model: "Classifies each changed file and computes the review contract",
+                  tokens: "1 call per PR",
+                  temp: "Cheap + fast works well",
                 },
                 {
                   stage: "review",
-                  model: "configurable",
-                  tokens: "configurable",
-                  temp: "configurable",
+                  model: "The actual findings — per-file reviewers (and specialists under Deep Review)",
+                  tokens: "1+ calls per file; \u00D74 under Deep Review",
+                  temp: "Spend your best model here",
                 },
                 {
                   stage: "scoring",
-                  model: "configurable",
-                  tokens: "configurable",
-                  temp: "configurable",
+                  model: "Judges every candidate finding against class-aware thresholds",
+                  tokens: "1 call per PR",
+                  temp: "Mid-tier is usually enough",
                 },
                 {
                   stage: "synthesis",
-                  model: "configurable",
-                  tokens: "configurable",
-                  temp: "configurable",
+                  model: "Writes the summary, verdict, fix ordering — also powers simulation",
+                  tokens: "1 call per PR (+1 per scenario)",
+                  temp: "Strong writing quality helps",
                 },
               ].map((row, i, arr) => (
                 <div
@@ -1545,10 +1539,12 @@ export function DocsContent() {
             </div>
 
             <p className="text-[11px] font-mono text-iron mt-3">
-              Supported providers: OpenRouter, OpenAI, Anthropic, Azure OpenAI,
-              GCP Vertex AI, AWS Bedrock, Zhipu AI, and Vercel AI Gateway.
-              Custom model names are supported &mdash; enter any model
-              identifier your provider accepts.
+              Supported providers: OpenRouter, OpenAI, Anthropic, Fireworks AI,
+              Groq, Together AI, DeepSeek, Azure OpenAI, GCP Vertex AI, AWS
+              Bedrock, Zhipu AI (GLM), and Vercel AI Gateway. Only providers
+              with a saved API key appear as options. Custom model names are
+              supported &mdash; enter any model identifier your provider
+              accepts.
             </p>
           </div>
 
@@ -1556,9 +1552,11 @@ export function DocsContent() {
           <div>
             <SectionHeader id="api-keys" title="API Keys (BYOK)" />
             <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
-              Your keys, your models, your bill. Argus never stores prompts or
-              code on our servers &mdash; API calls go straight from our
-              backend to your chosen provider. No hidden costs, no surprises.
+              Your keys, your models, your bill. API calls go straight from
+              our backend to your chosen provider &mdash; you pay the provider
+              directly and see every token in the dashboard. Argus stores
+              review results, PR metadata, and memory; it does not retain a
+              copy of your source tree.
             </p>
             <div className="border border-iron bg-charcoal p-4">
               <div className="flex items-center gap-3 mb-3">
@@ -1595,9 +1593,9 @@ export function DocsContent() {
               </ul>
             </div>
             <p className="text-[11px] font-mono text-iron mt-3">
-              We never see your code. We never see your keys. Without
-              a key configured, Argus posts a friendly onboarding comment on
-              your first PR linking to Settings.
+              Without a key configured, Argus posts a friendly onboarding
+              comment on your first PR linking to Settings — once per PR, not
+              on every push.
             </p>
           </div>
 
@@ -1609,10 +1607,10 @@ export function DocsContent() {
             </p>
             <p className="text-xs font-mono text-slate-text mb-8 leading-relaxed">
               Memory is stored in Argus&apos;s own Postgres database as
-              ordinary rows, each with an embedding alongside it. Retrieval
-              is a hybrid of vector similarity and full-text search, fused and
-              scoped to your installation. Self-host Argus and none of it
-              leaves your infrastructure.
+              ordinary rows, each tagged with the embedding space that
+              produced it. Retrieval is a hybrid of vector similarity and
+              full-text search, fused and scoped to your installation.
+              Self-host Argus and none of it leaves your infrastructure.
             </p>
 
             <div className="border border-iron bg-charcoal p-4 mb-4">
@@ -1628,12 +1626,17 @@ export function DocsContent() {
                   <span className="text-amber">
                     Providers
                   </span>{" "}
-                  in the dashboard
+                  in the dashboard and find the{" "}
+                  <span className="text-amber">Memory embeddings</span> card
                 </li>
                 <li>
-                  Pick an embeddings provider and model under{" "}
-                  <span className="text-amber">Memory</span> &mdash; Voyage by
-                  default, OpenAI, or any OpenAI-compatible endpoint
+                  Nothing is required &mdash; memory uses the platform
+                  embedding model (voyage-4) out of the box
+                </li>
+                <li>
+                  Bring your own Voyage or OpenAI key, or point at any
+                  OpenAI-compatible <code className="text-amber">/embeddings</code>{" "}
+                  endpoint (self-hosted, 1024-dim) to own the embedding space
                 </li>
                 <li>
                   Settings are scoped per-org &mdash; all repos in the org
@@ -1644,8 +1647,9 @@ export function DocsContent() {
 
             <p className="text-[11px] font-mono text-iron">
               Changing the embedding model changes the vector space. Existing
-              rows keep the model they were written with, and are only
-              retrieved by a query embedded in the same space.
+              rows are re-embedded by a backfill process and similarity
+              thresholds re-calibrate &mdash; retrieval quality can shift
+              until that completes.
             </p>
           </div>
 
@@ -1654,8 +1658,9 @@ export function DocsContent() {
             <SectionHeader id="personas" title="Review Personas" />
             <p className="text-xs font-mono text-slate-text mb-4 leading-relaxed">
               Not every PR needs the same reviewer. Personas tune the tone,
-              focus, and severity threshold &mdash; from a gentle mentor to a
-              zero-mercy auditor. Set a default per-repo or override per-PR.
+              focus, and analysis depth &mdash; from a gentle mentor to a
+              zero-mercy auditor. The severity bar itself never moves. Set a
+              default per-repo or override per-PR.
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {[
@@ -1684,8 +1689,16 @@ export function DocsContent() {
                   desc: "Exhaustive analysis depth — traces every path and error branch. The severity bar never changes; it doesn't manufacture comments.",
                 },
                 {
+                  name: "adversarial",
+                  desc: "Assumes the worst about every code path. Finds what breaks under pressure — hostile input, races, edge conditions.",
+                },
+                {
+                  name: "fresh_eyes",
+                  desc: "Reviews as if seeing the codebase for the first time. Flags anything that isn't immediately obvious to a newcomer.",
+                },
+                {
                   name: "custom",
-                  desc: "Define your own persona with a freeform system prompt. Full control over tone, focus, and severity.",
+                  desc: "Define your own persona with a freeform system prompt. Full control over tone and focus — the severity bar still applies.",
                 },
               ].map((p) => (
                 <div
@@ -1725,17 +1738,20 @@ export function DocsContent() {
               Argus supports two trigger modes. Pick per-org, override per-repo.
             </p>
             <p className="text-xs font-mono text-slate-text mb-6 leading-relaxed">
-              <span className="text-foreground">Auto-review on (default).</span>{" "}
+              <span className="text-foreground">Auto-review on.</span>{" "}
               Every PR opened, pushed, or reopened is reviewed automatically —
               no checkbox, no preview. A push to an open PR re-reviews the new
               commits.
               <br />
               <br />
-              <span className="text-foreground">Auto-review off.</span>{" "}
-              When a PR opens — or is pushed while off — Argus posts a{" "}
+              <span className="text-foreground">Auto-review off (hosted default).</span>{" "}
+              Reviews cost your tokens, so the hosted app starts off: Argus
+              posts a{" "}
               <span className="text-amber">Trigger Argus review</span>{" "}
               checkbox comment (once per PR) with an estimated token + cost
-              preview. Reviewers tick the box to run a review on demand.
+              preview. A maintainer ticks the box to run a review on demand.
+              Self-hosted installs default to on and still respect an
+              explicit off.
             </p>
 
             <div className="grid gap-3 md:grid-cols-2">
@@ -1748,8 +1764,13 @@ export function DocsContent() {
                 </div>
                 <p className="text-[11px] font-mono text-slate-text leading-relaxed">
                   Repo override beats org default. If the repo setting is
-                  unset, the org default applies. If both are unset, auto-run
-                  is on.
+                  unset, the org default applies. If both are unset: off on
+                  the hosted app, on when self-hosted. Manual triggers — the
+                  checkbox and{" "}
+                  <code className="text-amber bg-iron/40 rounded px-1 py-0.5">
+                    @argus-eye review
+                  </code>{" "}
+                  — run regardless.
                 </p>
               </div>
 
@@ -1761,13 +1782,13 @@ export function DocsContent() {
                   </span>
                 </div>
                 <p className="text-[11px] font-mono text-slate-text leading-relaxed">
-                  Every review draws from a 10/hour per-repo bucket and a
-                  50/day per-org bucket. Checkbox clicks and{" "}
+                  Every review draws from a 30/hour per-repo bucket and a
+                  200/day per-org bucket. Checkbox clicks and{" "}
                   <code className="text-amber bg-iron/40 rounded px-1 py-0.5">
                     --force
                   </code>{" "}
-                  additionally draw from a tighter 3/hour per-repo force bucket
-                  — effectively capping on-demand triggers at 3/hour.
+                  additionally draw from a 10/hour per-repo force bucket —
+                  capping on-demand triggers at 10/hour.
                 </p>
               </div>
 
@@ -1810,14 +1831,16 @@ export function DocsContent() {
             </h3>
             <ol className="space-y-2 text-xs font-mono text-slate-text leading-relaxed list-decimal pl-5 mb-6">
               <li>
-                PR opens → Argus posts a single comment with cost preview and{" "}
+                The first PR event while auto-review is off — open, push, or
+                reopen — posts a single comment with a cost preview and{" "}
                 <code className="text-amber bg-iron/40 rounded px-0.5">
                   - [ ] Trigger Argus review
                 </code>
-                .
+                . It posts once per PR; later pushes don&apos;t repost.
               </li>
               <li>
-                A user with triage-level access ticks the box. GitHub fires an{" "}
+                A user with write access to the repo ticks the box. GitHub
+                fires an{" "}
                 <code className="text-amber bg-iron/40 rounded px-1 py-0.5">
                   issue_comment.edited
                 </code>{" "}
@@ -1828,11 +1851,12 @@ export function DocsContent() {
                 <code className="text-amber bg-iron/40 rounded px-1 py-0.5">
                   argus-eye[bot]
                 </code>{" "}
-                (anti-hijack), rate-limits the click, swaps the checkbox for{" "}
+                and the ticker has write access (anti-hijack), rate-limits
+                the click, swaps the checkbox for{" "}
                 <code className="text-amber bg-iron/40 rounded px-1 py-0.5">
                   Running Argus review…
                 </code>
-                , and dispatches the review.
+                , and dispatches the review. A refused click resets the box.
               </li>
               <li>
                 If the pipeline errors, the checkbox is restored with a retry
@@ -1869,7 +1893,10 @@ export function DocsContent() {
               </div>
               <ul className="space-y-1.5 text-[11px] font-mono text-slate-text leading-relaxed list-disc pl-4">
                 <li>
-                  Trigger comments are posted only on <code className="text-amber">opened</code>. Pushes to an open PR (<code className="text-amber">synchronize</code>) do not repost — use the existing checkbox or{" "}
+                  The trigger comment posts once per PR, on the first open,
+                  push, or reopen seen while auto-review is off. A PR that
+                  predates the install gets it on the next push instead. No
+                  comment at all? Use{" "}
                   <code className="text-amber">@argus-eye review</code>.
                 </li>
                 <li>
@@ -1910,7 +1937,7 @@ export function DocsContent() {
                 },
                 {
                   cmd: "@argus-eye remember <pattern>",
-                  desc: "Teach Argus something new. Saves a pattern to memory for future reviews. Add --org to apply across all repos.",
+                  desc: "Teach Argus something new. Saves a pattern to memory for future reviews. Requires write access; --org applies across all repos and needs owner or org-member status.",
                   example:
                     "@argus-eye remember --org always check for SQL injection in raw queries",
                 },
@@ -1926,12 +1953,12 @@ export function DocsContent() {
                 },
                 {
                   cmd: "@argus-eye test",
-                  desc: "Generate a test plan from review findings. Covers unit, edge case, integration, and regression tests.",
+                  desc: "Generate a test plan from review findings. Covers unit, edge case, integration, and regression tests. Needs a completed review on the PR first.",
                   example: "@argus-eye test",
                 },
                 {
                   cmd: "@argus-eye test --code",
-                  desc: "Draft executable test code for findings, matching your project's framework and conventions.",
+                  desc: "Draft executable test code for findings, matching your project's framework and conventions. Needs a completed review on the PR first.",
                   example: "@argus-eye test --code",
                 },
                 {
@@ -1966,6 +1993,13 @@ export function DocsContent() {
                 </div>
               ))}
             </div>
+
+            <p className="text-[11px] font-mono text-iron mt-4">
+              Commands run regardless of the auto-review setting — they&apos;re
+              explicit intent. Self-hosted installs answer to their own{" "}
+              <code className="text-amber">GITHUB_APP_SLUG</code>, not
+              necessarily <code className="text-amber">@argus-eye</code>.
+            </p>
           </div>
 
           {/* ── Test Generation ── */}
@@ -2047,7 +2081,7 @@ export function DocsContent() {
                 {
                   icon: Activity,
                   title: "Scenarios",
-                  desc: "Three sources: auto-extracted from reviews, auto-imported from GitHub Issues labeled argus or bug, and manual via bot command. Each scenario includes steps, initial state, and expected outcome. Scenarios are marked outdated when referenced files change. React \uD83D\uDC4E to dismiss.",
+                  desc: "Three sources: auto-extracted from reviews, auto-imported from GitHub Issues labeled argus or bug, and manual from the dashboard. Each scenario includes steps, initial state, and expected outcome. Scenarios are marked outdated when referenced files change. React \uD83D\uDC4E to dismiss.",
                 },
                 {
                   icon: History,
@@ -2239,10 +2273,12 @@ export function DocsContent() {
                   </span>
                 </div>
                 <p className="text-[11px] font-mono text-slate-text leading-relaxed">
-                  Token usage tracked for: triage, review, scoring, synthesis,
-                  enrichment, conventions, patterns, file_synthesis, and graph.
-                  Each stage records input tokens, output tokens, model, and
-                  cost.
+                  Every stage that calls a model records input tokens, output
+                  tokens, model, provider, and cost: intent, triage, review
+                  (per-file, per-specialist), lead agent, graph, file
+                  synthesis, scoring, synthesis, enrichment, conventions,
+                  patterns, acceptance, cross-PR, simulation, and
+                  auto-resolve.
                 </p>
               </div>
 
@@ -2319,47 +2355,32 @@ export function DocsContent() {
               Toggle capabilities per-org from the dashboard.
             </p>
             <p className="text-xs font-mono text-slate-text mb-8 leading-relaxed">
-              Feature flags let you enable or disable advanced capabilities
-              without code changes. All flags are scoped per-org and take
-              effect on the next review.
+              These flags are scoped to the whole installation and take effect
+              on the next review. Find them under{" "}
+              <span className="text-amber">Settings &rarr; Org Defaults &rarr; Verification Features</span>.
+              Per-repo pipeline toggles live under{" "}
+              <a href="#settings" className="text-amber hover:text-foreground transition-colors">
+                Settings &amp; Controls
+              </a>
+              .
             </p>
 
             <div className="space-y-3">
               {[
                 {
-                  label: "Cross-PR Checks",
-                  desc: "Detect linked PRs across repos and run compatibility verification. Adds one extra LLM call per linked PR.",
-                  status: "off",
-                },
-                {
                   label: "Issue Acceptance",
-                  desc: "Verify that PR diffs address linked issue acceptance criteria. Works with GitHub\u2019s native issue-linking keywords.",
+                  desc: "Verify that PR diffs address linked issue acceptance criteria. Works with GitHub\u2019s native issue-linking keywords and the Development panel. Costs ~1\u20132k tokens per linked issue.",
                   status: "on by default",
                 },
                 {
-                  label: "Deep Review",
-                  desc: "4-specialist parallel review per file. Higher coverage, higher token cost.",
-                  status: "off",
-                },
-                {
-                  label: "PR Enrichment",
-                  desc: "Append Mermaid diagrams and missing context to PR descriptions after review.",
+                  label: "Cross-Repo PR Checks",
+                  desc: "Detect linked PRs and run compatibility verification — schema races, contract drift, deploy ordering, plus joint issue coverage when linked PRs share an issue.",
                   status: "on by default",
                 },
                 {
-                  label: "Pattern Learning",
-                  desc: "Auto-extract reusable code patterns from high-confidence findings.",
-                  status: "on by default",
-                },
-                {
-                  label: "Convention Learning",
-                  desc: "Extract naming, error handling, and architecture conventions from diffs.",
-                  status: "on by default",
-                },
-                {
-                  label: "Architecture Graph",
-                  desc: "Build and maintain a persistent dependency graph from code changes.",
-                  status: "on by default",
+                  label: "Max Linked PRs",
+                  desc: "Caps how many linked PRs the cross-PR worker fetches per review. Any integer 1\u201320.",
+                  status: "default 5",
                 },
               ].map((toggle) => (
                 <div
@@ -2391,10 +2412,19 @@ export function DocsContent() {
             </div>
 
             <p className="text-[11px] font-mono text-iron mt-4">
-              Manage flags in{" "}
-              <span className="text-amber">Settings &rarr; Features</span>.
-              Changes apply to the next review triggered on any repo in the
-              org.
+              Existing installations keep whatever was stored before the
+              defaults flipped — the on-by-defaults apply only where nothing
+              was saved. Rate limits: cross-PR work is bounded at 30 calls per
+              installation-hour and 2 refreshes per PR per 10 minutes. Deep
+              dives:{" "}
+              <a href="/docs/features/issue-acceptance" className="text-amber hover:text-foreground transition-colors">issue acceptance</a>
+              ,{" "}
+              <a href="/docs/features/cross-pr-checks" className="text-amber hover:text-foreground transition-colors">cross-repo PR checks</a>
+              ,{" "}
+              <a href="/docs/features/memory-tuning" className="text-amber hover:text-foreground transition-colors">memory tuning</a>
+              ,{" "}
+              <a href="/docs/faq" className="text-amber hover:text-foreground transition-colors">FAQ</a>
+              .
             </p>
           </div>
 
@@ -2412,6 +2442,11 @@ export function DocsContent() {
                 {
                   label: "Auto-review",
                   desc: "Review every PR automatically — opened, pushed, or reopened; a push re-reviews the new commits. When off, Argus posts a Trigger checkbox (once per PR) with a token/cost preview — reviewers tick to run on demand.",
+                  status: "off by default \u00B7 on when self-hosted",
+                },
+                {
+                  label: "Auto-resolve",
+                  desc: "On every push, checks whether the new commits changed lines Argus previously flagged (within \u00B13 lines) and resolves those threads. Pure-diff — no LLM call, no token cost — and runs even when auto-review is off.",
                   status: "on by default",
                 },
                 {
@@ -2472,7 +2507,7 @@ export function DocsContent() {
                       </span>
                       <span
                         className={`ml-auto text-[9px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded border ${
-                          toggle.status === "off"
+                          toggle.status.startsWith("off")
                             ? "bg-iron/20 text-slate-text border-iron"
                             : "bg-green-500/20 text-green-400 border-green-500/30"
                         }`}
@@ -2489,11 +2524,19 @@ export function DocsContent() {
             </div>
 
             <p className="text-[11px] font-mono text-iron mt-4">
-              All toggles are accessible from{" "}
-              <span className="text-amber">Settings</span> in the dashboard.
-              Changes take effect on the next review.
+              Pipeline toggles are per-org on{" "}
+              <span className="text-amber">Settings &rarr; Org Defaults</span>{" "}
+              and overridable per-repo on{" "}
+              <span className="text-amber">Repo Overrides</span>. The{" "}
+              <span className="text-amber">Limits</span> tab caps review size —
+              past a soft limit Argus reviews the highest-risk files at reduced
+              depth, past a hard limit it refuses and posts why (defaults:
+              60/400 files, 1.5k/20k changed lines, 3M/10M average tokens;
+              the token measure only engages once the repo has review
+              history). Changes take effect on the next review.
             </p>
           </div>
+
 
         </div>
       </div>

@@ -909,7 +909,7 @@ function PromptCard({
  * When off, the backend posts a one-shot "Trigger Argus review" checkbox
  * comment on opened PRs, with a token/cost estimate from history + live
  * diff. Clicking the checkbox fires an edited webhook and runs the review
- * under the 3/hr force-cap path.
+ * under the 10/hr force-cap path.
  *
  * A cost/behavior control, not a capability toggle.
  */
@@ -918,8 +918,8 @@ const AUTO_RUN_TOGGLE = {
 	label: "Auto-review every PR",
 	hint: "Run a review automatically on PR open and on every new commit",
 	description:
-		"On by default. When off, Argus posts a task-list checkbox on opened PRs (and on new pushes) with an estimated token / cost preview. Ticking the box runs the review on demand.",
-	defaultValue: true,
+		"Off by default on hosted Argus (self-hosted defaults to on). When off, Argus posts a task-list checkbox on opened PRs (and on new pushes) with an estimated token / cost preview. Ticking the box runs the review on demand.",
+	defaultValue: false,
 } as const;
 
 /* AUTO_RESOLVE_TOGGLE: separate from AUTO_RUN because it's diff-only and

@@ -15,9 +15,9 @@ const (
 
 // RateLimiter manages per-repo and per-org rate limits using token buckets.
 type RateLimiter struct {
-	repoHourly  sync.Map // repo full name → *rate.Limiter (burst 10, refill ~10/hr)
-	orgDaily    sync.Map // org login → *rate.Limiter (burst 50, refill ~50/day)
-	forceHourly sync.Map // repo full name → *rate.Limiter (burst 3, refill ~3/hr)
+	repoHourly  sync.Map // repo full name → *rate.Limiter (burst 30, refill ~30/hr)
+	orgDaily    sync.Map // org login → *rate.Limiter (burst 200, refill ~200/day)
+	forceHourly sync.Map // repo full name → *rate.Limiter (burst 10, refill ~10/hr)
 	stopOnce    sync.Once
 	done        chan struct{}
 }

@@ -10,7 +10,7 @@ export default function CrossPRChecksPage() {
   return (
     <article className="space-y-6">
       <h1 className="text-2xl font-mono text-slate-100">Cross-repo PR compatibility</h1>
-      <LastUpdated date="2026-04-17" />
+      <LastUpdated date="2026-09-20" />
 
       <p>
         Cross-repo dependencies are a known GitHub gap — there&apos;s no native way to say &quot;my
@@ -66,7 +66,8 @@ feature flag.`}
         Cross-repo PR checks are enabled by default for new installations. Cost is 1–5 LLM calls
         per review depending on how many linked PRs and shared issues are involved; bounded by a
         per-install rate limit (30/hour) and a per-PR refresh cap (2 per 10 minutes). Disable in{" "}
-        <strong className="text-slate-200">Settings → Features</strong>. Existing installations
+        <strong className="text-slate-200">Settings → Org Defaults → Verification Features</strong>;
+        the max-linked-PRs cap (default 5, range 1–20) lives there too. Existing installations
         keep whatever toggle value was stored before the default flip.
       </p>
 

@@ -17,9 +17,18 @@ export default function DocsLayout({ children }: { children: ReactNode }) {
           </Link>
           <h2 className="text-xs font-mono text-slate-500 uppercase mb-3 tracking-wider">Docs</h2>
           <nav className="space-y-1">
+            <DocLink href="/docs">Overview</DocLink>
+
+            <p className="pt-4 pb-1 text-[10px] font-mono uppercase tracking-wider text-slate-600">
+              Features
+            </p>
             <DocLink href="/docs/features/issue-acceptance">Issue acceptance</DocLink>
             <DocLink href="/docs/features/cross-pr-checks">Cross-repo PR checks</DocLink>
             <DocLink href="/docs/features/memory-tuning">Memory tuning</DocLink>
+
+            <p className="pt-4 pb-1 text-[10px] font-mono uppercase tracking-wider text-slate-600">
+              Help
+            </p>
             <DocLink href="/docs/faq">FAQ</DocLink>
           </nav>
         </div>

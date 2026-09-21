@@ -10,7 +10,7 @@ export default function FAQPage() {
   return (
     <article className="space-y-8">
       <h1 className="text-2xl font-mono text-slate-100">FAQ</h1>
-      <LastUpdated date="2026-09-14" />
+      <LastUpdated date="2026-09-20" />
 
       <section>
         <h2 className="text-base font-mono text-slate-100 mb-2">
@@ -62,10 +62,11 @@ export default function FAQPage() {
           Who can click the trigger checkbox?
         </h2>
         <p className="text-slate-400">
-          Anyone GitHub allows to toggle task-list checkboxes on the repo
-          (typically triage+ access). The review runs under a tighter{" "}
-          <strong className="text-slate-200">3/hour per-repo</strong> cap for
-          checkbox-triggered reviews (same as the{" "}
+          Ticking the box requires <strong className="text-slate-200">repository
+          write access</strong> — Argus checks the editor&apos;s permission, not
+          just the comment body. The review runs under a tighter{" "}
+          <strong className="text-slate-200">10/hour per-repo</strong> cap for
+          checkbox-triggered reviews (same bucket as the{" "}
           <code className="bg-slate-900 px-1 text-amber">--force</code> command flag).
           Clicks on pasted or forged trigger comments are ignored — only
           comments authored by <code className="bg-slate-900 px-1 text-amber">argus-eye[bot]</code>{" "}
@@ -116,13 +117,16 @@ export default function FAQPage() {
           Can I disable these features?
         </h2>
         <p className="text-slate-400">
-          Yes. Go to <strong className="text-slate-200">Settings → Features</strong>:
+          Yes. Auto-review lives under{" "}
+          <strong className="text-slate-200">Settings → Org Defaults → Auto-review</strong>{" "}
+          (per-repo on Repo Overrides); the verification features live under{" "}
+          <strong className="text-slate-200">Settings → Org Defaults → Verification Features</strong>:
         </p>
         <ul className="list-disc pl-5 mt-2 space-y-1 text-slate-400">
-          <li><strong className="text-slate-200">Auto-review</strong> — when off, opened PRs get a trigger checkbox instead of running automatically (default: off on hosted, on when self-hosted).</li>
+          <li><strong className="text-slate-200">Auto-review</strong> — when off, opened PRs get a trigger checkbox instead of running automatically (default: off on hosted, on when self-hosted and unset).</li>
           <li><strong className="text-slate-200">Issue acceptance check</strong> — toggles the issue verification worker (default: on).</li>
-          <li><strong className="text-slate-200">Cross-repo PR checks</strong> — toggles the cross-PR worker (default: on for new installations).</li>
-          <li><strong className="text-slate-200">Max linked PRs per review</strong> — caps how many PRs the cross-PR worker fetches (default: 5).</li>
+          <li><strong className="text-slate-200">Cross-repo PR checks</strong> — toggles the cross-PR worker (default: on).</li>
+          <li><strong className="text-slate-200">Max linked PRs per review</strong> — caps how many PRs the cross-PR worker fetches (default: 5, range 1–20).</li>
         </ul>
       </section>
 

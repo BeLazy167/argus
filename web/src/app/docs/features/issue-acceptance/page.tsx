@@ -10,7 +10,7 @@ export default function IssueAcceptancePage() {
   return (
     <article className="space-y-6">
       <h1 className="text-2xl font-mono text-slate-100">Issue acceptance check</h1>
-      <LastUpdated date="2026-04-17" />
+      <LastUpdated date="2026-09-20" />
 
       <p>
         When a pull request closes an issue, Argus verifies that the diff actually addresses
@@ -82,9 +82,10 @@ export default function IssueAcceptancePage() {
 
       <h2 className="text-lg font-mono text-slate-100 pt-4">Disable</h2>
       <p>
-        Go to <strong className="text-slate-200">Settings → Features</strong> to toggle the check off.
-        It&apos;s enabled by default because it&apos;s cheap (~1-2k extra tokens per linked issue) and
-        catches real bugs.
+        Go to{" "}
+        <strong className="text-slate-200">Settings → Org Defaults → Verification Features</strong>{" "}
+        to toggle the check off. It&apos;s enabled by default because it&apos;s cheap (~1–2k extra
+        tokens per linked issue) and catches real bugs.
       </p>
     </article>
   );
