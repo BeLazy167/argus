@@ -109,6 +109,8 @@ const MODEL_PICKS: Record<Provider, string[]> = {
 	aws_bedrock: ["anthropic.claude-sonnet-4", "anthropic.claude-haiku"],
 	zhipu: ["glm-5", "glm-4-plus", "glm-4"],
 	vercel: [
+		"openai/gpt-6-sol",
+		"openai/gpt-6-luna",
 		"openai/gpt-5.6-sol",
 		"openai/gpt-5.6-luna",
 		"openai/gpt-5.6-terra",

@@ -599,7 +599,12 @@ func isOpenAIReasoning(m string) bool {
 // requiresMaxCompletionTokens returns true for models that reject max_tokens
 // and require max_completion_tokens instead (GPT-5+).
 func requiresMaxCompletionTokens(m string) bool {
-	return strings.HasPrefix(m, "gpt-5") || strings.Contains(m, "/gpt-5")
+	for _, family := range []string{"gpt-5", "gpt-6"} {
+		if strings.HasPrefix(m, family) || strings.Contains(m, "/"+family) {
+			return true
+		}
+	}
+	return false
 }
 
 func isAnthropicThinking(m string) bool {

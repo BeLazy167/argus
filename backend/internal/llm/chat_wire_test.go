@@ -209,6 +209,21 @@ func TestComplete_WireFormat(t *testing.T) {
 			wantGatewayOnly: []string{"azure"},
 		},
 		{
+			// gpt-6 is a reasoning model like gpt-5.x: same body shape.
+			name:             "vercel_gateway_gpt6_reasoning_shape",
+			providerName:     "vercel",
+			model:            "openai/gpt-6-sol",
+			effort:           ReasoningNone,
+			temperature:      0.2,
+			gatewayOnlyParam: "azure",
+			wantKey: map[string]any{
+				"reasoning_effort":      "low",
+				"max_completion_tokens": float64(100),
+			},
+			wantAbsent:      []string{"temperature", "max_tokens", "reasoning"},
+			wantGatewayOnly: []string{"azure"},
+		},
+		{
 			// Direct Azure keeps "minimal" — the clamp is gateway-scoped.
 			// Guards against "fix one half of a pair" by pinning the other half.
 			name:         "azure_gpt56_keeps_minimal",
